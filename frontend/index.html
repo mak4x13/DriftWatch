@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DriftWatch</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="orb orb-left"></div>
+    <div class="orb orb-right"></div>
+    <main class="app-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Mistral Worldwide Hackathon 2026</p>
+          <h1>DriftWatch</h1>
+          <p class="subtitle">AI That Catches AI Lying</p>
+        </div>
+        <div class="hero-badge">
+          <span>Semantic Auditor</span>
+          <strong>Live</strong>
+        </div>
+      </header>
+
+      <section class="dashboard-grid">
+        <section class="panel panel-input">
+          <div class="panel-heading">
+            <h2>Define Your Pipeline</h2>
+            <p>Describe the goal, add source evidence, and shape each agent step.</p>
+          </div>
+
+          <label class="field">
+            <span>User Goal</span>
+            <textarea
+              id="userGoal"
+              rows="4"
+              placeholder="Analyze TechCorp Q3 earnings and write analyst report"
+            ></textarea>
+          </label>
+
+          <div class="button-row goal-actions">
+            <button type="button" id="runDemoButton" class="action-button demo-button">
+              Run Demo Pipeline
+            </button>
+            <button type="button" id="runCustomButton" class="action-button custom-button">
+              Run Custom Pipeline
+            </button>
+          </div>
+
+          <label class="field">
+            <span>Source Documents</span>
+            <textarea
+              id="sourceDocuments"
+              rows="10"
+              placeholder="Paste source documents here. Separate documents with a blank line."
+            ></textarea>
+          </label>
+
+          <div class="steps-header">
+            <span>Pipeline Steps</span>
+            <button type="button" id="addStepButton" class="ghost-button">Add Step</button>
+          </div>
+          <div id="stepsContainer" class="steps-list"></div>
+        </section>
+
+        <section class="panel panel-stream">
+          <div class="panel-heading">
+            <h2>Live Audit Log</h2>
+            <p>Watch each step execute, get audited, and self-correct in real time.</p>
+          </div>
+          <div id="streamStatus" class="stream-status">Waiting for pipeline run.</div>
+          <div id="eventFeed" class="event-feed"></div>
+        </section>
+
+        <section class="panel panel-output">
+          <div class="panel-heading panel-heading-split">
+            <div>
+              <h2>Pipeline Output</h2>
+              <p>Trust score, hallucination count, and the final corrected report.</p>
+            </div>
+            <button type="button" id="exportButton" class="ghost-button export-button">
+              Export Audit Trail
+            </button>
+          </div>
+
+          <div class="stats-bar">
+            <div class="stat-card">
+              <span class="stat-label">Steps</span>
+              <strong id="statSteps">0</strong>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">Hallucinations</span>
+              <strong id="statHallucinations">0</strong>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">Corrections</span>
+              <strong id="statCorrections">0</strong>
+            </div>
+          </div>
+
+          <div class="gauge-card">
+            <div class="gauge-header">
+              <span>Overall Drift Score</span>
+              <strong id="driftScoreLabel">0.00</strong>
+            </div>
+            <div class="gauge-track">
+              <div id="driftGaugeFill" class="gauge-fill"></div>
+            </div>
+          </div>
+
+          <div id="trustBadge" class="trust-badge neutral">Awaiting run</div>
+
+          <article id="finalOutput" class="final-output">
+            Final pipeline output will appear here once the run finishes.
+          </article>
+        </section>
+      </section>
+    </main>
+
+    <template id="stepTemplate">
+      <article class="step-card">
+        <div class="step-card-head">
+          <span class="step-index"></span>
+          <button type="button" class="remove-step ghost-button">Remove</button>
+        </div>
+        <label class="field">
+          <span>Step Name</span>
+          <input type="text" class="step-name" placeholder="Research Summarizer" />
+        </label>
+        <label class="field">
+          <span>Instruction</span>
+          <textarea
+            class="step-instruction"
+            rows="4"
+            placeholder="Summarize the key facts from the context."
+          ></textarea>
+        </label>
+      </article>
+    </template>
+
+    <script src="./app.js" defer></script>
+  </body>
+</html>
