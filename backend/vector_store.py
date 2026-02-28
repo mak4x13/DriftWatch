@@ -9,6 +9,7 @@ from typing import Any
 import chromadb
 from chromadb.config import Settings
 
+from backend.logging_utils import get_run_logger
 from backend.mistral_client import MistralClient
 
 logger = logging.getLogger(__name__)
@@ -51,7 +52,8 @@ async def ingest_sources(texts: list[str], run_id: str) -> None:
     if not texts:
         return
 
-    embeddings = await _mistral.embed(texts)
+    run_logger = get_run_logger(logger, run_id)
+    embeddings = await _mistral.embed(texts, run_id=run_id)
     dimension = len(embeddings[0]) if embeddings else 0
     collection = init_chroma(dimension)
     ids = [f"{run_id}:{index}" for index, _ in enumerate(texts)]
@@ -63,7 +65,7 @@ async def ingest_sources(texts: list[str], run_id: str) -> None:
         metadatas=metadatas,
         embeddings=embeddings,
     )
-    logger.info("Ingested %s source documents for run_id=%s", len(texts), run_id)
+    run_logger.info("Ingested %s source documents.", len(texts))
 
 
 async def query_sources(claim: str, run_id: str, n_results: int = 3) -> list[str]:
@@ -72,7 +74,7 @@ async def query_sources(claim: str, run_id: str, n_results: int = 3) -> list[str
     if not claim.strip():
         return []
 
-    query_embedding = await _mistral.embed([claim])
+    query_embedding = await _mistral.embed([claim], run_id=run_id)
     dimension = len(query_embedding[0]) if query_embedding else 0
     collection = init_chroma(dimension)
     result = collection.query(
@@ -92,3 +94,20 @@ def _collection_name(dimension: int) -> str:
     """Build a stable collection name for one embedding dimensionality."""
 
     return f"sources_{dimension}"
+
+
+def reset_source_collections() -> list[str]:
+    """Delete all persistent source collections so the demo can start clean."""
+
+    client = init_chroma()
+    deleted: list[str] = []
+    collections = client.list_collections()
+    for collection in collections:
+        name = collection if isinstance(collection, str) else getattr(collection, "name", "")
+        if not name.startswith("sources_"):
+            continue
+        client.delete_collection(name=name)
+        deleted.append(name)
+
+    _collections.clear()
+    return deleted

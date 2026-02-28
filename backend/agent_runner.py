@@ -7,6 +7,7 @@ import logging
 from datetime import datetime, timezone
 
 from backend.auditor import audit_step, autofix_step
+from backend.logging_utils import get_run_logger
 from backend.models import AuditEvent, AuditResult, PipelineRequest, PipelineResult
 from backend.mistral_client import MistralClient
 from backend.vector_store import ingest_sources
@@ -21,6 +22,7 @@ async def run_pipeline(
 ) -> PipelineResult:
     """Execute a pipeline end-to-end with audit checks after each step."""
 
+    run_logger = get_run_logger(logger, request.run_id)
     audit_results: list[AuditResult] = []
     previous_outputs: list[str] = []
     final_output = ""
@@ -34,6 +36,12 @@ async def run_pipeline(
                 source_documents=request.source_documents,
                 previous_output=final_output,
             )
+            system_prompt, user_prompt = _build_step_prompt(
+                request=request,
+                step_name=step.name,
+                instruction=step.instruction,
+                resolved_context=resolved_context,
+            )
             await _emit_event(
                 event_queue=event_queue,
                 event_type="STEP_START",
@@ -45,28 +53,9 @@ async def run_pipeline(
             )
 
             original_output = await mistral.run_agent_step(
-                system=(
-                    "You are a precise workflow step inside DriftWatch. "
-                    "Use only facts explicitly supported by the verified source documents "
-                    "or the provided input context. Do not invent or calculate new numbers, "
-                    "comparisons, placeholders, recommendations, dates, tickers, or causal "
-                    "claims unless they are explicitly stated. If a detail is missing, omit it."
-                ),
-                user=(
-                    f"User goal:\n{request.user_goal}\n\n"
-                    f"Step name:\n{step.name}\n\n"
-                    f"Instruction:\n{step.instruction}\n\n"
-                    f"Input context:\n{resolved_context}\n\n"
-                    f"Verified source documents:\n{chr(10).join(request.source_documents)}\n\n"
-                    "Output rules:\n"
-                    "- Use only grounded facts from the input context or verified sources.\n"
-                    "- Do not invent arithmetic differences or comparative deltas.\n"
-                    "- Do not add placeholders such as [Insert Date], [Ticker], [X], or [Your Name].\n"
-                    "- If a requested field is not present in the sources, leave it out.\n"
-                    "- Preserve the stated figures and timelines exactly when possible.\n"
-                    "- If the instruction explicitly says a demo hallucination is required, "
-                    "include only that one intentional incorrect claim and keep everything else grounded.\n"
-                ),
+                system=system_prompt,
+                user=user_prompt,
+                run_id=request.run_id,
             )
 
             await _emit_event(
@@ -80,16 +69,34 @@ async def run_pipeline(
                 },
             )
 
-            audit_result = await audit_step(
-                step_output=original_output,
-                user_goal=request.user_goal,
-                previous_outputs=previous_outputs,
-                run_id=request.run_id,
-                mistral=mistral,
-            )
-            audit_result = audit_result.model_copy(update={"step_id": step.step_id})
+            if request.driftwatch_enabled:
+                audit_result = await audit_step(
+                    step_output=original_output,
+                    user_goal=request.user_goal,
+                    previous_outputs=previous_outputs,
+                    run_id=request.run_id,
+                    mistral=mistral,
+                )
+                audit_result = audit_result.model_copy(
+                    update={
+                        "step_id": step.step_id,
+                        "step_name": step.name,
+                    }
+                )
+            else:
+                audit_result = AuditResult(
+                    step_id=step.step_id,
+                    step_name=step.name,
+                    verdict="PASS",
+                    drift_score=1.0,
+                    issues=[],
+                    summary="DriftWatch protection disabled. Output forwarded without audit.",
+                    original_output=original_output,
+                    final_output=original_output,
+                    auto_fixed=False,
+                )
 
-            logger.info(
+            run_logger.info(
                 "Audit decision step_id=%s verdict=%s drift_score=%.2f",
                 step.step_id,
                 audit_result.verdict,
@@ -104,13 +111,18 @@ async def run_pipeline(
 
             final_step_output = original_output
             auto_fixed = False
-            if audit_result.verdict == "FLAG" and request.auto_fix:
+            if (
+                request.driftwatch_enabled
+                and audit_result.verdict == "FLAG"
+                and request.auto_fix
+            ):
                 for _ in range(2):
                     candidate = await autofix_step(
                         original_output=final_step_output,
                         audit_result=audit_result,
                         sources=request.source_documents,
                         mistral=mistral,
+                        run_id=request.run_id,
                     )
                     if candidate.strip() and candidate.strip() != final_step_output.strip():
                         final_step_output = candidate.strip()
@@ -157,7 +169,7 @@ async def run_pipeline(
         )
         return result
     except Exception as exc:
-        logger.exception("Pipeline run failed for run_id=%s: %s", request.run_id, exc)
+        run_logger.exception("Pipeline run failed: %s", exc)
         await _emit_event(
             event_queue=event_queue,
             event_type="ERROR",
@@ -176,6 +188,52 @@ def _resolve_input_context(
     resolved = resolved.replace("[SOURCE DOCUMENTS INJECTED]", "\n\n".join(source_documents))
     resolved = resolved.replace("[PREVIOUS STEP OUTPUT]", previous_output or "No previous output.")
     return resolved
+
+
+def _build_step_prompt(
+    request: PipelineRequest,
+    step_name: str,
+    instruction: str,
+    resolved_context: str,
+) -> tuple[str, str]:
+    """Build the agent prompt, with stricter grounding only when protection is enabled."""
+
+    if request.driftwatch_enabled:
+        system_prompt = (
+            "You are a precise workflow step inside DriftWatch. "
+            "Use only facts explicitly supported by the verified source documents "
+            "or the provided input context. Do not invent or calculate new numbers, "
+            "comparisons, placeholders, recommendations, dates, tickers, or causal "
+            "claims unless they are explicitly stated. If a detail is missing, omit it."
+        )
+        user_prompt = (
+            f"User goal:\n{request.user_goal}\n\n"
+            f"Step name:\n{step_name}\n\n"
+            f"Instruction:\n{instruction}\n\n"
+            f"Input context:\n{resolved_context}\n\n"
+            f"Verified source documents:\n{chr(10).join(request.source_documents)}\n\n"
+            "Output rules:\n"
+            "- Use only grounded facts from the input context or verified sources.\n"
+            "- Do not invent arithmetic differences or comparative deltas.\n"
+            "- Do not add placeholders such as [Insert Date], [Ticker], [X], or [Your Name].\n"
+            "- If a requested field is not present in the sources, leave it out.\n"
+            "- Preserve the stated figures and timelines exactly when possible.\n"
+            "- If the instruction explicitly says a demo hallucination is required, "
+            "include only that one intentional incorrect claim and keep everything else grounded.\n"
+        )
+        return system_prompt, user_prompt
+
+    system_prompt = (
+        "You are a workflow step in a multi-stage AI pipeline. "
+        "Follow the instruction using the supplied input context."
+    )
+    user_prompt = (
+        f"User goal:\n{request.user_goal}\n\n"
+        f"Step name:\n{step_name}\n\n"
+        f"Instruction:\n{instruction}\n\n"
+        f"Input context:\n{resolved_context}\n"
+    )
+    return system_prompt, user_prompt
 
 
 def _build_autofix_summary(audit_result: AuditResult) -> str:
@@ -202,7 +260,15 @@ def _build_pipeline_result(
 ) -> PipelineResult:
     """Aggregate final pipeline metrics from per-step audit results."""
 
-    overall_drift_score = max((result.drift_score for result in audit_results), default=0.0)
+    effective_scores = [
+        0.1 if result.auto_fixed else result.drift_score
+        for result in audit_results
+    ]
+    overall_drift_score = (
+        1.0
+        if not request.driftwatch_enabled
+        else max(effective_scores, default=0.0)
+    )
     total_hallucinations = sum(
         1
         for result in audit_results
@@ -210,8 +276,18 @@ def _build_pipeline_result(
         if issue.type == "HALLUCINATION"
     )
     total_corrections = sum(1 for result in audit_results if result.auto_fixed)
-    trustworthy = all(result.verdict == "PASS" or result.auto_fixed for result in audit_results)
+    unresolved_high = any(
+        not result.auto_fixed
+        and any(issue.severity == "HIGH" for issue in result.issues)
+        for result in audit_results
+    )
+    trustworthy = (
+        request.driftwatch_enabled
+        and overall_drift_score < 0.4
+        and not unresolved_high
+    )
     final_output = audit_results[-1].final_output if audit_results else ""
+    overall_verdict = "TRUSTWORTHY" if trustworthy else "REVIEW_REQUIRED"
 
     return PipelineResult(
         run_id=request.run_id,
@@ -222,6 +298,8 @@ def _build_pipeline_result(
         total_hallucinations=total_hallucinations,
         total_corrections=total_corrections,
         pipeline_trustworthy=trustworthy,
+        overall_verdict=overall_verdict,
+        driftwatch_enabled=request.driftwatch_enabled,
     )
 
 

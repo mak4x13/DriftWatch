@@ -26,6 +26,7 @@ class PipelineRequest(BaseModel):
     steps: list[PipelineStep]
     source_documents: list[str]
     auto_fix: bool = True
+    driftwatch_enabled: bool = True
 
 
 class SourceDocument(BaseModel):
@@ -49,6 +50,7 @@ class AuditResult(BaseModel):
     """The audit verdict and any applied correction for one step."""
 
     step_id: str
+    step_name: str = ""
     verdict: Literal["PASS", "FLAG"]
     drift_score: float
     issues: list[AuditIssue]
@@ -87,3 +89,5 @@ class PipelineResult(BaseModel):
     total_hallucinations: int
     total_corrections: int
     pipeline_trustworthy: bool
+    overall_verdict: Literal["TRUSTWORTHY", "REVIEW_REQUIRED"]
+    driftwatch_enabled: bool

@@ -6,6 +6,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
 from backend.agent_runner import run_pipeline
+from backend.logging_utils import get_run_logger
 from backend.mistral_client import MistralClient
 from backend.models import AuditEvent, PipelineRequest, PipelineResult, SourceDocument
 
@@ -61,7 +63,9 @@ app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 async def run_pipeline_route(request: PipelineRequest) -> PipelineResult:
     """Run a custom pipeline request and return the completed result."""
 
+    _validate_pipeline_request(request)
     queue = _get_or_create_queue(request.run_id)
+    run_logger = get_run_logger(logger, request.run_id)
     try:
         return await run_pipeline(
             request=request,
@@ -69,6 +73,7 @@ async def run_pipeline_route(request: PipelineRequest) -> PipelineResult:
             event_queue=queue,
         )
     except Exception as exc:
+        run_logger.exception("Pipeline route failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
@@ -99,17 +104,21 @@ async def stream_pipeline_events(run_id: str, request: Request) -> EventSourceRe
 @app.post("/api/pipeline/demo", response_model=PipelineResult)
 async def run_demo_pipeline(
     run_id: str | None = Query(default=None),
+    driftwatch_enabled: bool = Query(default=True),
 ) -> PipelineResult:
     """Run the prebuilt demo pipeline used in the hackathon presentation."""
 
     from backend.demo_pipeline import DEMO_PIPELINE_REQUEST
 
-    request = (
-        DEMO_PIPELINE_REQUEST.model_copy(update={"run_id": run_id})
-        if run_id
-        else DEMO_PIPELINE_REQUEST
+    request = DEMO_PIPELINE_REQUEST.model_copy(
+        update={
+            "run_id": run_id or str(uuid4()),
+            "driftwatch_enabled": driftwatch_enabled,
+        }
     )
+    _validate_pipeline_request(request)
     queue = _get_or_create_queue(request.run_id)
+    run_logger = get_run_logger(logger, request.run_id)
     try:
         return await run_pipeline(
             request=request,
@@ -117,7 +126,24 @@ async def run_demo_pipeline(
             event_queue=queue,
         )
     except Exception as exc:
+        run_logger.exception("Demo pipeline route failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/demo/reset")
+async def reset_demo() -> dict[str, object]:
+    """Delete demo collections and clear completed event queues."""
+
+    from backend.vector_store import reset_source_collections
+
+    deleted_collections = reset_source_collections()
+    RUN_QUEUES.clear()
+    logger.info("Reset demo state. Deleted collections: %s", deleted_collections)
+    return {
+        "status": "ok",
+        "message": "Demo state reset successfully.",
+        "deleted_collections": deleted_collections,
+    }
 
 
 @app.post("/api/sources/ingest")
@@ -200,3 +226,23 @@ def _get_mistral_client() -> MistralClient:
         mistral = MistralClient()
         app.state.mistral = mistral
     return mistral
+
+
+def _validate_pipeline_request(request: PipelineRequest) -> None:
+    """Validate required pipeline inputs before execution starts."""
+
+    if not any(document.strip() for document in request.source_documents):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Source documents are required for hallucination detection. "
+                "Please provide at least one source document."
+            ),
+        )
+
+    for step in request.steps:
+        if len(step.instruction.strip()) < 20:
+            raise HTTPException(
+                status_code=400,
+                detail="Step instructions must be at least 20 characters to be meaningful.",
+            )

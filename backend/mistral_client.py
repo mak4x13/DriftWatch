@@ -14,8 +14,11 @@ from typing import Any
 
 from dotenv import load_dotenv
 from mistralai import Mistral
+from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential
 
+from backend.logging_utils import get_run_logger
 from backend.models import AuditIssue, AuditResult
+from backend.prompts import AUDITOR_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 NUMERIC_TOKEN_PATTERN = r"(?<![A-Za-z0-9])\$?(?:\d+\.\d+|\d+)(?:B|M|%|x)?(?![A-Za-z0-9])"
@@ -36,23 +39,6 @@ VERDICT_ALIASES = {
     "FLAG": "FLAG",
 }
 
-AUDITOR_SYSTEM_PROMPT = """
-You are DriftWatch, a semantic audit engine for AI pipelines.
-Your job is to evaluate AI-generated outputs for three failure modes:
-1. INTENT DRIFT: Does this output still serve the original user goal?
-2. HALLUCINATION: Is every specific claim (numbers, names, dates,
-   statistics) traceable to the provided source documents?
-3. CONTRADICTION: Does this output contradict any previous step outputs?
-Respond ONLY in this exact JSON format:
-{  "verdict": "PASS" or "FLAG",
-   "drift_score": 0.0-1.0,
-   "issues": [{"type": "...", "severity": "...",
-               "claim": "...", "reason": "...", "suggestion": "..."}],
-   "summary": "one sentence plain English summary" }
-Flag if drift_score > 0.3 or any HIGH severity issue exists.
-"""
-
-
 class MistralClient:
     """Thin async client for agent, auditor, autofix, and embedding calls."""
 
@@ -66,24 +52,28 @@ class MistralClient:
         self.auditor_model = "mistral-large-latest"
         self.embed_model = "mistral-embed"
 
-    async def run_agent_step(self, system: str, user: str) -> str:
+    async def run_agent_step(self, system: str, user: str, run_id: str | None = None) -> str:
         """Execute one pipeline step with the agent model."""
 
+        run_logger = get_run_logger(logger, run_id)
         try:
             response = await self._chat_complete(
                 model=self.agent_model,
                 system=system,
                 user=user,
                 temperature=0.3,
+                run_id=run_id,
+                operation_name="agent_step",
             )
             return self._extract_text_content(response).strip()
         except Exception as exc:
-            logger.exception("Agent step failed: %s", exc)
+            run_logger.exception("Agent step failed: %s", exc)
             return self._deterministic_agent_step(user)
 
-    async def run_auditor(self, audit_prompt: str) -> AuditResult:
+    async def run_auditor(self, audit_prompt: str, run_id: str | None = None) -> AuditResult:
         """Execute the auditor model and parse its JSON verdict."""
 
+        run_logger = get_run_logger(logger, run_id)
         fallback = AuditResult(
             step_id="",
             verdict="PASS",
@@ -100,6 +90,8 @@ class MistralClient:
                 system=AUDITOR_SYSTEM_PROMPT.strip(),
                 user=audit_prompt,
                 temperature=0.0,
+                run_id=run_id,
+                operation_name="auditor",
             )
             payload_text = self._extract_text_content(response)
             payload = json.loads(self._strip_json_fence(payload_text))
@@ -121,14 +113,14 @@ class MistralClient:
                 auto_fixed=False,
             )
         except json.JSONDecodeError as exc:
-            logger.warning("Auditor JSON parse failed: %s", exc)
+            run_logger.warning("Auditor JSON parse failed: %s", exc)
             return fallback.model_copy(
                 update={
                     "summary": "Auditor returned non-JSON output; using a safe fallback PASS.",
                 }
             )
         except Exception as exc:
-            logger.exception("Auditor call failed: %s", exc)
+            run_logger.exception("Auditor call failed: %s", exc)
             return fallback.model_copy(
                 update={
                     "summary": "Auditor API unavailable; using deterministic fallback checks.",
@@ -136,10 +128,15 @@ class MistralClient:
             )
 
     async def run_autofix(
-        self, original: str, issues: list[AuditIssue], sources: str
+        self,
+        original: str,
+        issues: list[AuditIssue],
+        sources: str,
+        run_id: str | None = None,
     ) -> str:
         """Rewrite a flagged output while preserving grounded claims."""
 
+        run_logger = get_run_logger(logger, run_id)
         issue_lines = "\n".join(
             f"- {issue.type} [{issue.severity}] claim={issue.claim} "
             f"fix={issue.suggestion}"
@@ -159,18 +156,21 @@ class MistralClient:
                 system="You are a precise editor. Remove or qualify unverified claims.",
                 user=prompt,
                 temperature=0.2,
+                run_id=run_id,
+                operation_name="autofix",
             )
             corrected = self._extract_text_content(response).strip()
             return corrected or original
         except Exception as exc:
-            logger.exception("Autofix call failed: %s", exc)
+            run_logger.exception("Autofix call failed: %s", exc)
             return self._deterministic_autofix(original=original, issues=issues, sources=sources)
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(self, texts: list[str], run_id: str | None = None) -> list[list[float]]:
         """Embed text with Mistral, falling back to deterministic local vectors."""
 
         if not texts:
             return []
+        run_logger = get_run_logger(logger, run_id)
         try:
             if self.client is None:
                 raise RuntimeError("MISTRAL_API_KEY is not configured.")
@@ -181,7 +181,11 @@ class MistralClient:
                     inputs=texts,
                 )
 
-            response = await asyncio.to_thread(_call)
+            response = await self._run_with_retry(
+                operation=_call,
+                run_id=run_id,
+                operation_name="embeddings",
+            )
             data = getattr(response, "data", None)
             if data is None and isinstance(response, dict):
                 data = response.get("data", [])
@@ -198,11 +202,17 @@ class MistralClient:
                 vectors.append([float(value) for value in vector])
             return vectors
         except Exception as exc:
-            logger.warning("Embedding fallback activated: %s", exc)
+            run_logger.warning("Embedding fallback activated: %s", exc)
             return [self._local_embedding(text) for text in texts]
 
     async def _chat_complete(
-        self, model: str, system: str, user: str, temperature: float
+        self,
+        model: str,
+        system: str,
+        user: str,
+        temperature: float,
+        run_id: str | None = None,
+        operation_name: str = "chat_completion",
     ) -> Any:
         """Execute a blocking SDK chat call in a worker thread."""
 
@@ -219,7 +229,31 @@ class MistralClient:
                 ],
             )
 
-        return await asyncio.to_thread(_call)
+        return await self._run_with_retry(
+            operation=_call,
+            run_id=run_id,
+            operation_name=operation_name,
+        )
+
+    async def _run_with_retry(
+        self,
+        operation: Any,
+        run_id: str | None,
+        operation_name: str,
+    ) -> Any:
+        """Execute an SDK operation with retry handling for shared-key instability."""
+
+        async for attempt in AsyncRetrying(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=2, min=2, max=8),
+            retry=retry_if_exception(self._is_retryable_mistral_error),
+            reraise=True,
+            before_sleep=self._before_sleep(run_id=run_id, operation_name=operation_name),
+        ):
+            with attempt:
+                return await asyncio.to_thread(operation)
+
+        raise RuntimeError(f"{operation_name} failed after retries.")
 
     def _extract_text_content(self, response: Any) -> str:
         """Extract the first assistant message text from SDK or dict responses."""
@@ -260,6 +294,29 @@ class MistralClient:
             text = re.sub(r"^```(?:json)?\s*", "", text)
             text = re.sub(r"\s*```$", "", text)
         return text.strip()
+
+    def _before_sleep(self, run_id: str | None, operation_name: str) -> Any:
+        """Create a retry hook that logs rate-limit and availability retries."""
+
+        run_logger = get_run_logger(logger, run_id)
+
+        def _log_retry(retry_state: Any) -> None:
+            exception = retry_state.outcome.exception() if retry_state.outcome else None
+            status_code = getattr(exception, "status_code", "unknown")
+            run_logger.warning(
+                "Retrying %s after API status %s (attempt %s).",
+                operation_name,
+                status_code,
+                retry_state.attempt_number,
+            )
+
+        return _log_retry
+
+    def _is_retryable_mistral_error(self, exception: BaseException) -> bool:
+        """Return whether a Mistral error should be retried."""
+
+        status_code = getattr(exception, "status_code", None)
+        return status_code in {429, 503}
 
     def _deterministic_autofix(
         self, original: str, issues: list[AuditIssue], sources: str

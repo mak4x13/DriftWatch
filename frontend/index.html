@@ -9,6 +9,59 @@
   <body>
     <div class="orb orb-left"></div>
     <div class="orb orb-right"></div>
+
+    <button
+      type="button"
+      id="helpToggle"
+      class="help-toggle"
+      aria-controls="helpSidebar"
+      aria-expanded="false"
+    >
+      ?
+    </button>
+
+    <aside id="helpSidebar" class="help-sidebar" aria-hidden="true">
+      <div class="help-header">
+        <h2>How DriftWatch Works</h2>
+        <button type="button" id="helpCloseButton" class="ghost-button sidebar-close">
+          Close
+        </button>
+      </div>
+      <section class="help-section">
+        <h3>01 Intent Drift Check</h3>
+        <p>
+          DriftWatch compares every step output against the original user goal before
+          it moves forward. If the pipeline starts answering a different question, the
+          auditor flags that drift immediately.
+        </p>
+      </section>
+      <section class="help-section">
+        <h3>02 Hallucination Detection</h3>
+        <p>
+          Source documents are embedded into ChromaDB and retrieved during each audit.
+          DriftWatch verifies concrete claims against those retrieved passages before
+          the next step can rely on them.
+        </p>
+      </section>
+      <section class="help-section">
+        <h3>03 Contradiction Guard</h3>
+        <p>
+          Later pipeline steps are checked against earlier outputs for semantic
+          conflicts. That prevents one bad claim from mutating into a polished final
+          answer.
+        </p>
+      </section>
+      <section class="help-section help-why">
+        <h3>Why This Matters</h3>
+        <p>
+          Every AI coding agent today writes code and walks away. Every AI research
+          tool generates summaries and moves on. DriftWatch is the first tool that
+          makes AI accountable for what it produces - catching lies before they reach
+          humans.
+        </p>
+      </section>
+    </aside>
+
     <main class="app-shell">
       <header class="hero">
         <div>
@@ -16,17 +69,52 @@
           <h1>DriftWatch</h1>
           <p class="subtitle">AI That Catches AI Lying</p>
         </div>
-        <div class="hero-badge">
-          <span>Semantic Auditor</span>
-          <strong>Live</strong>
+        <div class="hero-actions">
+          <div class="hero-controls">
+            <button type="button" id="resetDemoButton" class="ghost-button header-button">
+              Reset Demo
+            </button>
+            <section class="protection-panel protection-panel-hero">
+              <div class="protection-copy">
+                <h3>DriftWatch Protection</h3>
+                <p>Toggle live guardrails on or off.</p>
+              </div>
+              <label class="protection-switch">
+                <input type="checkbox" id="protectionToggle" checked />
+                <span class="protection-slider"></span>
+              </label>
+              <div id="protectionState" class="protection-state protection-on">ON</div>
+            </section>
+          </div>
+          <div id="liveBadge" class="hero-badge idle">
+            <div class="hero-badge-top">
+              <span>Semantic Auditor</span>
+              <span id="liveDot" class="live-dot"></span>
+            </div>
+            <strong id="liveBadgeState">Idle</strong>
+          </div>
         </div>
       </header>
+
+      <div id="alertBanner" class="alert-banner" hidden></div>
 
       <section class="dashboard-grid">
         <section class="panel panel-input">
           <div class="panel-heading">
             <h2>Define Your Pipeline</h2>
-            <p>Describe the goal, add source evidence, and shape each agent step.</p>
+            <p>Load a template, tune the steps, and choose whether DriftWatch protects the run.</p>
+          </div>
+
+          <div class="template-toolbar">
+            <label class="field template-field">
+              <span>Load Template</span>
+              <select id="templateSelect"></select>
+            </label>
+            <div class="field template-action">
+              <button type="button" id="savePipelineButton" class="ghost-button save-button">
+                Save Pipeline
+              </button>
+            </div>
           </div>
 
           <label class="field">
@@ -38,7 +126,7 @@
             ></textarea>
           </label>
 
-          <div class="button-row goal-actions">
+          <div class="button-row run-actions">
             <button type="button" id="runDemoButton" class="action-button demo-button">
               Run Demo Pipeline
             </button>
@@ -69,7 +157,10 @@
             <p>Watch each step execute, get audited, and self-correct in real time.</p>
           </div>
           <div id="streamStatus" class="stream-status">Waiting for pipeline run.</div>
-          <div id="eventFeed" class="event-feed"></div>
+          <div class="stream-layout">
+            <aside id="stepTimeline" class="step-timeline"></aside>
+            <div id="eventFeed" class="event-feed"></div>
+          </div>
         </section>
 
         <section class="panel panel-output">
@@ -111,7 +202,7 @@
           <div id="trustBadge" class="trust-badge neutral">Awaiting run</div>
 
           <article id="finalOutput" class="final-output">
-            Final pipeline output will appear here once the run finishes.
+            <p>Final pipeline output will appear here once the run finishes.</p>
           </article>
         </section>
       </section>
@@ -138,6 +229,7 @@
       </article>
     </template>
 
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="./app.js" defer></script>
   </body>
 </html>

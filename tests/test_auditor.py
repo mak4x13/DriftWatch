@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import pytest
 
+from backend.agent_runner import _build_pipeline_result
 from backend.auditor import _extract_claim_candidates, audit_step, autofix_step
-from backend.models import AuditIssue, AuditResult
+from backend.models import AuditIssue, AuditResult, PipelineRequest, PipelineStep
 
 
 class FakeMistral:
     """Minimal async stub for auditor and autofix tests."""
 
-    async def run_auditor(self, audit_prompt: str) -> AuditResult:
+    async def run_auditor(
+        self, audit_prompt: str, run_id: str | None = None
+    ) -> AuditResult:
         return AuditResult(
             step_id="",
             verdict="PASS",
@@ -24,7 +27,11 @@ class FakeMistral:
         )
 
     async def run_autofix(
-        self, original: str, issues: list[AuditIssue], sources: str
+        self,
+        original: str,
+        issues: list[AuditIssue],
+        sources: str,
+        run_id: str | None = None,
     ) -> str:
         for issue in issues:
             if issue.claim in original and "$3.2B" in issue.suggestion:
@@ -98,3 +105,96 @@ async def test_autofix_step_replaces_unsupported_claim() -> None:
 
     assert "$3.2B" in corrected
     assert "$4.7B" not in corrected
+
+
+def test_build_pipeline_result_uses_post_fix_drift_for_trust() -> None:
+    """Auto-fixed steps should contribute a reduced effective drift score."""
+
+    request = PipelineRequest(
+        user_goal="Analyze a financial report",
+        steps=[
+            PipelineStep(
+                step_id="step_1",
+                name="Summarizer",
+                instruction="Summarize the financial report using only grounded figures.",
+                input_context="[SOURCE DOCUMENTS INJECTED]",
+            )
+        ],
+        source_documents=["Revenue reached $3.2B."],
+        auto_fix=True,
+        driftwatch_enabled=True,
+    )
+    result = _build_pipeline_result(
+        request,
+        [
+            AuditResult(
+                step_id="step_1",
+                step_name="Summarizer",
+                verdict="FLAG",
+                drift_score=0.75,
+                issues=[
+                    AuditIssue(
+                        type="HALLUCINATION",
+                        severity="HIGH",
+                        claim="$4.7B",
+                        reason="Unsupported revenue figure.",
+                        suggestion="Replace with $3.2B.",
+                    )
+                ],
+                summary="Hallucination detected.",
+                original_output="Revenue was $4.7B.",
+                final_output="Revenue was $3.2B.",
+                auto_fixed=True,
+            )
+        ],
+    )
+
+    assert result.overall_drift_score == 0.1
+    assert result.pipeline_trustworthy is True
+    assert result.overall_verdict == "TRUSTWORTHY"
+
+
+def test_build_pipeline_result_requires_review_with_unresolved_high_issue() -> None:
+    """Unresolved high-severity issues should force review required."""
+
+    request = PipelineRequest(
+        user_goal="Analyze a financial report",
+        steps=[
+            PipelineStep(
+                step_id="step_1",
+                name="Summarizer",
+                instruction="Summarize the financial report using only grounded figures.",
+                input_context="[SOURCE DOCUMENTS INJECTED]",
+            )
+        ],
+        source_documents=["Revenue reached $3.2B."],
+        auto_fix=True,
+        driftwatch_enabled=True,
+    )
+    result = _build_pipeline_result(
+        request,
+        [
+            AuditResult(
+                step_id="step_1",
+                step_name="Summarizer",
+                verdict="FLAG",
+                drift_score=0.35,
+                issues=[
+                    AuditIssue(
+                        type="HALLUCINATION",
+                        severity="HIGH",
+                        claim="$4.7B",
+                        reason="Unsupported revenue figure.",
+                        suggestion="Replace with $3.2B.",
+                    )
+                ],
+                summary="Hallucination detected.",
+                original_output="Revenue was $4.7B.",
+                final_output="Revenue was $4.7B.",
+                auto_fixed=False,
+            )
+        ],
+    )
+
+    assert result.pipeline_trustworthy is False
+    assert result.overall_verdict == "REVIEW_REQUIRED"

@@ -12,22 +12,6 @@ from backend.vector_store import query_sources
 
 logger = logging.getLogger(__name__)
 
-AUDITOR_SYSTEM_PROMPT = """
-You are DriftWatch, a semantic audit engine for AI pipelines.
-Your job is to evaluate AI-generated outputs for three failure modes:
-1. INTENT DRIFT: Does this output still serve the original user goal?
-2. HALLUCINATION: Is every specific claim (numbers, names, dates,
-   statistics) traceable to the provided source documents?
-3. CONTRADICTION: Does this output contradict any previous step outputs?
-Respond ONLY in this exact JSON format:
-{  "verdict": "PASS" or "FLAG",
-   "drift_score": 0.0-1.0,
-   "issues": [{"type": "...", "severity": "...",
-               "claim": "...", "reason": "...", "suggestion": "..."}],
-   "summary": "one sentence plain English summary" }
-Flag if drift_score > 0.3 or any HIGH severity issue exists.
-"""
-
 NUMERIC_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])"
     r"(?:\$?\d+(?:\.\d+)?(?:\s*(?:B|M|%|x|billion|million|percent|times))?)"
@@ -56,7 +40,7 @@ async def audit_step(
         previous_outputs=previous_outputs,
         source_passages=source_passages,
     )
-    llm_result = await mistral.run_auditor(audit_prompt)
+    llm_result = await mistral.run_auditor(audit_prompt, run_id=run_id)
     heuristic_result = _run_rule_based_audit(
         step_output=step_output,
         user_goal=user_goal,
@@ -76,6 +60,7 @@ async def autofix_step(
     audit_result: AuditResult,
     sources: list[str],
     mistral: MistralClient,
+    run_id: str | None = None,
 ) -> str:
     """Rewrite a flagged output using the issue list and source context."""
 
@@ -84,6 +69,7 @@ async def autofix_step(
         original=original_output,
         issues=audit_result.issues,
         sources=source_blob,
+        run_id=run_id,
     )
     deterministic = _apply_issue_replacements(
         original=corrected or original_output,
@@ -120,7 +106,8 @@ def _build_audit_prompt(
     previous_text = "\n\n".join(previous_outputs) if previous_outputs else "None"
     source_text = "\n\n".join(source_passages) if source_passages else "None"
     return (
-        f"{AUDITOR_SYSTEM_PROMPT.strip()}\n\n"
+        "Audit this pipeline step against the original goal, prior outputs, "
+        "and retrieved source passages.\n\n"
         f"Original user goal:\n{user_goal}\n\n"
         f"Current step output:\n{step_output}\n\n"
         f"Previous step outputs:\n{previous_text}\n\n"
@@ -137,8 +124,6 @@ def _run_rule_based_audit(
     """Run deterministic checks to stabilize the audit outcome."""
 
     issues: list[AuditIssue] = []
-    source_blob = "\n".join(source_passages)
-
     issues.extend(_detect_hallucinations(step_output, source_passages))
     issues.extend(_detect_contradictions(step_output, previous_outputs, source_passages))
 
@@ -149,7 +134,7 @@ def _run_rule_based_audit(
     issues = _dedupe_issues(issues)
     verdict = "FLAG" if _should_flag(issues) else "PASS"
     drift_score = _score_issues(issues)
-    summary = _build_summary(issues, source_blob)
+    summary = _build_summary(issues)
 
     return AuditResult(
         step_id="",
@@ -419,7 +404,7 @@ def _score_issues(issues: list[AuditIssue]) -> float:
     return min(1.0, max(weights[issue.severity] for issue in issues))
 
 
-def _build_summary(issues: list[AuditIssue], source_blob: str) -> str:
+def _build_summary(issues: list[AuditIssue]) -> str:
     """Create a plain-English summary for the frontend."""
 
     if not issues:
@@ -673,17 +658,3 @@ def _display_numeric_token(value: str) -> str:
     if normalized.endswith("m"):
         return f"{normalized[:-1]}M"
     return normalized
-
-
-def _issue_overlaps(candidate: AuditIssue, existing: list[AuditIssue]) -> bool:
-    """Check whether an incoming issue duplicates an existing finding."""
-
-    candidate_claim = _normalize_numeric_token(candidate.claim)
-    for issue in existing:
-        if issue.type != candidate.type:
-            continue
-        if candidate_claim and candidate_claim == _normalize_numeric_token(issue.claim):
-            return True
-        if candidate.claim.strip() == issue.claim.strip():
-            return True
-    return False
