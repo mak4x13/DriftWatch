@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from backend.models import PipelineRequest, PipelineStep
 
+DEMO_OVERRIDE = True
+
 DEMO_SOURCE_DOCUMENTS = [
     """TechCorp Q3 2024 Earnings: Revenue reached $3.2B, up 12% YoY.
        CEO stated: expansion into Asian markets drove growth.""",

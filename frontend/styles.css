@@ -273,13 +273,58 @@ body::before {
   letter-spacing: 0.08em;
 }
 
+.field-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.field-header .field-label {
+  margin-bottom: 0;
+}
+
+.field-clear-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 4.4rem;
+  height: 2rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  padding: 0 0.75rem;
+  background: rgba(255, 255, 255, 0.05);
+  color: #d7e1f8;
+  font: inherit;
+  font-size: 0.76rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  transition:
+    opacity 180ms ease,
+    transform 180ms ease,
+    border-color 180ms ease,
+    background-color 180ms ease;
+}
+
+.field-clear-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: rgba(73, 165, 255, 0.35);
+  background: rgba(73, 165, 255, 0.12);
+}
+
+.field-clear-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .upload-zone {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 7rem;
+  min-height: 5.8rem;
   margin-bottom: 0.8rem;
-  padding: 1rem 1.1rem;
+  padding: 0.8rem 1rem;
   border: 1px dashed rgba(73, 165, 255, 0.42);
   border-radius: 18px;
   background:

@@ -1,0 +1,11 @@
+.git
+.github
+.venv
+__pycache__
+.pytest_cache
+chroma_data
+.env
+*.pyc
+*.pyo
+*.pyd
+node_modules

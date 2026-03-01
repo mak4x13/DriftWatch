@@ -23,9 +23,10 @@ class PipelineRequest(BaseModel):
 
     run_id: str = Field(default_factory=lambda: str(uuid4()))
     user_goal: str
-    steps: list[PipelineStep]
+    steps: list[PipelineStep] = Field(default_factory=list)
     source_documents: list[str]
     auto_fix: bool = True
+    auto_generate_steps: bool = False
     driftwatch_enabled: bool = True
 
 

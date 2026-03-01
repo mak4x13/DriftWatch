@@ -8,17 +8,21 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
+load_dotenv()
+
 from backend.agent_runner import run_pipeline
 from backend.logging_utils import get_run_logger
 from backend.mistral_client import MistralClient
 from backend.models import (
     AuditEvent,
+    PipelineStep,
     PipelineRequest,
     PipelineResult,
     SourceDocument,
@@ -70,7 +74,7 @@ app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 async def run_pipeline_route(request: PipelineRequest) -> PipelineResult:
     """Run a custom pipeline request and return the completed result."""
 
-    _validate_pipeline_request(request)
+    request = await _prepare_pipeline_request(request)
     queue = _get_or_create_queue(request.run_id)
     run_logger = get_run_logger(logger, request.run_id)
     try:
@@ -151,7 +155,7 @@ async def run_demo_pipeline(
             "driftwatch_enabled": driftwatch_enabled,
         }
     )
-    _validate_pipeline_request(request)
+    request = await _prepare_pipeline_request(request)
     queue = _get_or_create_queue(request.run_id)
     run_logger = get_run_logger(logger, request.run_id)
     try:
@@ -268,7 +272,7 @@ def _validate_pipeline_request(request: PipelineRequest) -> None:
 
     _validate_source_documents(request.source_documents)
 
-    if not request.steps:
+    if not request.steps and not request.auto_generate_steps:
         raise HTTPException(status_code=400, detail="At least one pipeline step is required.")
 
     for step in request.steps:
@@ -287,8 +291,40 @@ def _validate_source_documents(source_documents: list[str]) -> None:
 
     raise HTTPException(
         status_code=400,
-        detail=(
-            "Source documents are required for hallucination detection. "
-            "Please provide at least one source document."
-        ),
+        detail="Source documents are required for hallucination detection",
     )
+
+
+async def _prepare_pipeline_request(request: PipelineRequest) -> PipelineRequest:
+    """Validate a request and auto-generate steps when requested."""
+
+    _validate_pipeline_request(request)
+    if not request.auto_generate_steps:
+        return request
+
+    if request.steps:
+        return request
+
+    mistral = _get_mistral_client()
+    steps = await mistral.generate_pipeline_steps(
+        user_goal=request.user_goal,
+        source_documents=request.source_documents,
+        run_id=request.run_id,
+    )
+    if not steps:
+        raise HTTPException(status_code=500, detail="Unable to generate pipeline steps.")
+
+    built_steps = [
+        PipelineStep(
+            step_id=f"step_{index + 1}",
+            name=step.step_name,
+            instruction=step.instruction,
+            input_context=(
+                "[SOURCE DOCUMENTS INJECTED]"
+                if index == 0
+                else "[PREVIOUS STEP OUTPUT]"
+            ),
+        )
+        for index, step in enumerate(steps[:4])
+    ]
+    return request.model_copy(update={"steps": built_steps})

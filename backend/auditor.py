@@ -361,25 +361,17 @@ def _merge_audit_results(
             base_score,
             issues,
         )
+        verdict = "FLAG" if _should_flag(issues) or drift_score > 0.3 else "PASS"
+        summary = heuristic_result.summary
+        if verdict == "PASS" and not issues and llm_result.summary:
+            summary = llm_result.summary
+        elif verdict == "FLAG" and llm_result.summary and not heuristic_result.issues:
+            summary = llm_result.summary
     else:
-        issues = _dedupe_issues(
-            [issue for issue in llm_result.issues if issue.severity == "HIGH"]
-        )
-        base_score = max(
-            llm_result.drift_score if issues else 0.0,
-            _score_issues(issues),
-        )
-        drift_score = _adjust_drift_score(
-            base_score,
-            issues,
-        )
-
-    verdict = "FLAG" if _should_flag(issues) or drift_score > 0.3 else "PASS"
-    summary = heuristic_result.summary
-    if verdict == "PASS" and not issues and llm_result.summary:
-        summary = llm_result.summary
-    elif verdict == "FLAG" and llm_result.summary and not heuristic_result.issues:
-        summary = llm_result.summary
+        issues = []
+        drift_score = min(0.27, max(0.0, llm_result.drift_score))
+        verdict = "PASS"
+        summary = llm_result.summary or heuristic_result.summary
 
     return AuditResult(
         step_id="",

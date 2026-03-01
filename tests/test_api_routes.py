@@ -143,6 +143,63 @@ def test_run_and_demo_routes(monkeypatch) -> None:
     assert demo_response.json()["run_id"] == "demo-route"
 
 
+def test_run_route_auto_generates_steps(monkeypatch) -> None:
+    """The run route should generate steps when auto_generate_steps is enabled."""
+
+    captured: dict[str, object] = {}
+
+    async def fake_run_pipeline(request, mistral, event_queue):
+        captured["steps"] = request.steps
+        return _build_result(request.run_id, request.user_goal)
+
+    monkeypatch.setattr("backend.main.run_pipeline", fake_run_pipeline)
+    monkeypatch.setattr("backend.main._get_mistral_client", lambda: FakeRouteMistral())
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/pipeline/run",
+            json={
+                "run_id": "auto-generate-route",
+                "user_goal": "Analyze a report",
+                "source_documents": ["Revenue reached $3.2B."],
+                "auto_fix": True,
+                "auto_generate_steps": True,
+                "driftwatch_enabled": True,
+            },
+        )
+
+    assert response.status_code == 200
+    assert len(captured["steps"]) == 2
+    assert captured["steps"][0].name == "Source Extractor"
+
+
+def test_run_route_validates_missing_source_documents() -> None:
+    """The run route should return the exact missing-source validation message."""
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/pipeline/run",
+            json={
+                "run_id": "missing-sources-route",
+                "user_goal": "Analyze a report",
+                "steps": [
+                    {
+                        "step_id": "step_1",
+                        "name": "Writer",
+                        "instruction": "Write a grounded answer using only the supplied source material.",
+                        "input_context": "[SOURCE DOCUMENTS INJECTED]",
+                    }
+                ],
+                "source_documents": [],
+                "auto_fix": True,
+                "driftwatch_enabled": True,
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Source documents are required for hallucination detection"
+
+
 def test_ingest_reset_and_stream_routes(monkeypatch) -> None:
     """Ingest, reset, and SSE stream routes should all work with deterministic data."""
 
@@ -177,6 +234,7 @@ def test_ingest_reset_and_stream_routes(monkeypatch) -> None:
             json=[{"text": "Revenue reached $3.2B.", "run_id": "ingest-run"}],
         )
         with client.stream("GET", f"/api/pipeline/stream/{run_id}") as response:
+            assert response.headers["content-type"].startswith("text/event-stream")
             stream_body = "".join(response.iter_text())
         reset_response = client.post("/api/demo/reset")
 

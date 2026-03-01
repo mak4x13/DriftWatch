@@ -104,7 +104,7 @@ async def run_pipeline(
                     step_id=step.step_id,
                     step_name=step.name,
                     verdict="PASS",
-                    drift_score=1.0,
+                    drift_score=0.95,
                     issues=[],
                     summary="DriftWatch protection disabled. Output forwarded without audit.",
                     original_output=original_output,
@@ -130,6 +130,7 @@ async def run_pipeline(
             final_step_output = original_output
             auto_fixed = False
             working_audit_result = audit_result
+            flagged_audit_result = audit_result
             detected_hallucinations = audit_result.detected_hallucinations
             if (
                 request.driftwatch_enabled
@@ -191,7 +192,7 @@ async def run_pipeline(
                         step_id=step.step_id,
                         data={
                             "step_name": step.name,
-                            "summary": _build_autofix_summary(audit_result),
+                            "summary": _build_autofix_summary(flagged_audit_result),
                             "original_output": original_output,
                             "final_output": final_step_output,
                         },
@@ -265,10 +266,10 @@ def _build_step_prompt(
             "claims unless they are explicitly stated. If a detail is missing, omit it. "
             "You must only use information explicitly present in the provided source "
             "documents and previous step outputs. If specific information is not "
-            "available in the sources, explicitly state: [NOT IN SOURCES: this "
-            "information was not provided in the source documents]. Never infer, "
-            "estimate, or use external knowledge to fill gaps. It is better to "
-            "acknowledge missing information than to fabricate it."
+            "available in the sources, explicitly state [NOT IN SOURCES: this "
+            "information was not provided]. Never infer, estimate, or use external "
+            "knowledge to fill gaps. It is better to acknowledge missing information "
+            "than to fabricate it."
         )
         user_prompt = (
             f"User goal:\n{request.user_goal}\n\n"
@@ -282,6 +283,8 @@ def _build_step_prompt(
             "- Do not add placeholders such as [Insert Date], [Ticker], [X], or [Your Name].\n"
             "- If a requested field is not present in the sources, leave it out.\n"
             "- Preserve the stated figures and timelines exactly when possible.\n"
+            "- Preserve numeric formatting exactly as supplied (for example, keep "
+            "\"$3.2B\" as \"$3.2B\" rather than spelling it out).\n"
             "- If the instruction explicitly says a demo hallucination is required, "
             "include only that one intentional incorrect claim and keep everything else grounded.\n"
         )
@@ -298,7 +301,10 @@ def _build_step_prompt(
         f"User goal:\n{request.user_goal}\n\n"
         f"Step name:\n{step_name}\n\n"
         f"Instruction:\n{instruction}\n\n"
-        f"Input context:\n{resolved_context}\n"
+        f"Input context:\n{resolved_context}\n\n"
+        "Output rules:\n"
+        "- Preserve numeric formatting exactly as supplied (for example, keep "
+        "\"$4.7B\" as \"$4.7B\" rather than spelling it out).\n"
     )
     return system_prompt, user_prompt
 
@@ -332,7 +338,7 @@ def _build_pipeline_result(
         for result in audit_results
     ]
     overall_drift_score = (
-        1.0
+        0.95
         if not request.driftwatch_enabled
         else max(effective_scores, default=0.0)
     )
@@ -345,7 +351,6 @@ def _build_pipeline_result(
         for result in audit_results
     )
     final_output = audit_results[-1].final_output if audit_results else ""
-    has_not_in_sources = "[NOT IN SOURCES" in final_output
     uncorrected_hallucinations = max(total_hallucinations - total_corrections, 0)
     unresolved_ratio = (
         uncorrected_hallucinations / total_hallucinations
@@ -353,14 +358,17 @@ def _build_pipeline_result(
         else 0.0
     )
 
-    if request.driftwatch_enabled and overall_drift_score < 0.35 and not has_not_in_sources:
+    if (
+        request.driftwatch_enabled
+        and overall_drift_score < 0.35
+        and total_corrections >= total_hallucinations
+    ):
         overall_verdict = "TRUSTWORTHY"
     elif (
         request.driftwatch_enabled
         and (
             0.35 <= overall_drift_score <= 0.65
             or (total_corrections < total_hallucinations and overall_drift_score < 0.5)
-            or has_not_in_sources
         )
     ):
         overall_verdict = "PARTIALLY_VERIFIED"

@@ -54,7 +54,7 @@ async def test_run_pipeline_off_mode_skips_audit_and_preserves_hallucination(
     assert result.final_output == "Analyst report: TechCorp generated $4.7B in revenue and kept 53% market share."
     assert result.total_corrections == 0
     assert result.pipeline_trustworthy is False
-    assert result.overall_drift_score == 1.0
+    assert result.overall_drift_score == 0.95
     assert all(entry.auto_fixed is False for entry in result.audit_results)
     assert all(entry.verdict == "PASS" for entry in result.audit_results)
 

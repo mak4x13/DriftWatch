@@ -71,9 +71,6 @@
         </div>
         <div class="hero-actions">
           <div class="hero-controls">
-            <button type="button" id="resetDemoButton" class="ghost-button header-button">
-              Reset Demo
-            </button>
             <section class="protection-panel protection-panel-hero">
               <div class="protection-copy">
                 <h3>DriftWatch Protection</h3>
@@ -85,6 +82,9 @@
               </label>
               <div id="protectionState" class="protection-state protection-on">ON</div>
             </section>
+            <button type="button" id="resetDemoButton" class="ghost-button header-button">
+              Reset Demo
+            </button>
           </div>
           <div id="liveBadge" class="hero-badge idle">
             <div class="hero-badge-top">
@@ -107,7 +107,12 @@
           <div class="panel-body panel-input-body">
             <div class="panel-scroll panel-input-scroll">
               <label class="field">
-                <span>User Goal</span>
+                <span class="field-header">
+                  <span class="field-label">User Goal</span>
+                  <button type="button" id="clearUserGoalButton" class="field-clear-button">
+                    Clear
+                  </button>
+                </span>
                 <textarea
                   id="userGoal"
                   rows="4"
@@ -116,7 +121,12 @@
               </label>
 
               <div class="field">
-                <span>Source Documents</span>
+                <span class="field-header">
+                  <span class="field-label">Source Documents</span>
+                  <button type="button" id="clearSourceDocumentsButton" class="field-clear-button">
+                    Clear
+                  </button>
+                </span>
                 <div
                   id="uploadZone"
                   class="upload-zone"

@@ -5,7 +5,13 @@ from __future__ import annotations
 import pytest
 
 from backend.agent_runner import _build_pipeline_result
-from backend.auditor import _adjust_drift_score, _extract_claim_candidates, audit_step, autofix_step
+from backend.auditor import (
+    _adjust_drift_score,
+    _extract_claim_candidates,
+    _merge_audit_results,
+    audit_step,
+    autofix_step,
+)
 from backend.models import AuditIssue, AuditResult, PipelineRequest, PipelineStep
 
 
@@ -180,6 +186,49 @@ def test_adjusted_drift_score_scales_with_issue_volume() -> None:
     adjusted = _adjust_drift_score(0.15, issues)
 
     assert adjusted == 0.5
+
+
+def test_merge_audit_results_prefers_heuristics_when_llm_false_flags() -> None:
+    """LLM-only false positives should not flag a step when heuristics are clean."""
+
+    llm_result = AuditResult(
+        step_id="",
+        verdict="FLAG",
+        drift_score=0.92,
+        issues=[
+            AuditIssue(
+                type="HALLUCINATION",
+                severity="HIGH",
+                claim="$3.2B",
+                reason="Model-only false positive.",
+                suggestion="Remove the claim.",
+            )
+        ],
+        summary="Model-only flag.",
+        original_output="",
+        final_output="",
+        auto_fixed=False,
+    )
+    heuristic_result = AuditResult(
+        step_id="",
+        verdict="PASS",
+        drift_score=0.0,
+        issues=[],
+        summary="Heuristics found no grounded issues.",
+        original_output="",
+        final_output="",
+        auto_fixed=False,
+    )
+
+    merged = _merge_audit_results(
+        llm_result=llm_result,
+        heuristic_result=heuristic_result,
+        original_output="Revenue was $3.2B.",
+    )
+
+    assert merged.verdict == "PASS"
+    assert merged.issues == []
+    assert merged.drift_score == 0.27
 
 
 @pytest.mark.asyncio
@@ -358,8 +407,8 @@ def test_build_pipeline_result_requires_review_when_corrections_lag_hallucinatio
     assert result.overall_verdict == "REVIEW_REQUIRED"
 
 
-def test_build_pipeline_result_marks_partial_when_not_in_sources_remains() -> None:
-    """Presence of a NOT IN SOURCES marker should prevent full trust."""
+def test_build_pipeline_result_trusts_low_drift_when_corrections_cover_hallucinations() -> None:
+    """Low-drift runs are trustworthy when corrections cover all hallucinations."""
 
     request = PipelineRequest(
         user_goal="Write a startup memo",
@@ -392,5 +441,5 @@ def test_build_pipeline_result_marks_partial_when_not_in_sources_remains() -> No
         ],
     )
 
-    assert result.pipeline_trustworthy is False
-    assert result.overall_verdict == "PARTIALLY_VERIFIED"
+    assert result.pipeline_trustworthy is True
+    assert result.overall_verdict == "TRUSTWORTHY"

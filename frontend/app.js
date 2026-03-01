@@ -1,4 +1,12 @@
 const EMPTY_OUTPUT_MARKUP = "<p>Final pipeline output will appear here once the run finishes.</p>";
+const DEMO_USER_GOAL = "Analyze TechCorp Q3 performance and write analyst report";
+const DEMO_SOURCE_DOCUMENTS = [
+  "TechCorp Q3 2024 Earnings: Revenue reached $3.2B, up 12% YoY.\nCEO stated: expansion into Asian markets drove growth.",
+  "Market Analysis: TechCorp faces headwinds from rising chip costs.\nAnalyst consensus price target: $142. Current P/E ratio: 24x.",
+  "Competitor Report: RivalCorp posted $2.8B revenue same quarter.\nTechCorp maintains 53% market share in enterprise segment.",
+  "TechCorp Product Update: New AI chip released Q3, volume sales\nexpected Q1 2026. R&D spend increased 18% this quarter.",
+  "Economic Context: Fed rate unchanged. Tech sector up 4% this\nquarter. Inflation at 2.8%.",
+];
 
 const state = {
   eventSource: null,
@@ -22,7 +30,9 @@ const elements = {
   liveBadgeState: document.getElementById("liveBadgeState"),
   resetDemoButton: document.getElementById("resetDemoButton"),
   userGoal: document.getElementById("userGoal"),
+  clearUserGoalButton: document.getElementById("clearUserGoalButton"),
   sourceDocuments: document.getElementById("sourceDocuments"),
+  clearSourceDocumentsButton: document.getElementById("clearSourceDocumentsButton"),
   uploadZone: document.getElementById("uploadZone"),
   fileInput: document.getElementById("fileInput"),
   uploadedFileChips: document.getElementById("uploadedFileChips"),
@@ -80,7 +90,12 @@ function bindEvents() {
   elements.exportButton.addEventListener("click", exportAuditTrail);
   elements.helpToggle.addEventListener("click", toggleHelpSidebar);
   elements.helpCloseButton.addEventListener("click", closeHelpSidebar);
+  elements.clearUserGoalButton.addEventListener("click", clearUserGoal);
+  elements.clearSourceDocumentsButton.addEventListener("click", clearSourceDocuments);
+  elements.userGoal.addEventListener("input", updateFieldClearButtons);
+  elements.sourceDocuments.addEventListener("input", updateFieldClearButtons);
   bindUploadEvents();
+  updateFieldClearButtons();
 }
 
 function bindUploadEvents() {
@@ -239,6 +254,7 @@ function appendUploadedDocument(file, content) {
     label: fileLabel,
   });
   renderUploadedFileChips();
+  updateFieldClearButtons();
 }
 
 function nextUploadedFileLabel(fileName) {
@@ -278,7 +294,13 @@ function renderUploadedFileChips() {
         </div>
       `
     )
-    .join("");
+    .join("")
+    .replaceAll("Ã—", "&times;");
+}
+
+function clearUserGoal() {
+  elements.userGoal.value = "";
+  updateFieldClearButtons();
 }
 
 function removeUploadedFile(fileId) {
@@ -290,6 +312,7 @@ function removeUploadedFile(fileId) {
   elements.sourceDocuments.value = removeUploadedBlock(elements.sourceDocuments.value, file.label);
   state.uploadedFiles = state.uploadedFiles.filter((entry) => entry.id !== fileId);
   renderUploadedFileChips();
+  updateFieldClearButtons();
 }
 
 function removeUploadedBlock(sourceText, fileLabel) {
@@ -313,6 +336,26 @@ function cryptoSafeId() {
     return window.crypto.randomUUID();
   }
   return `upload-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function populateDemoInputs() {
+  elements.userGoal.value = DEMO_USER_GOAL;
+  elements.sourceDocuments.value = DEMO_SOURCE_DOCUMENTS.join("\n\n");
+  state.uploadedFiles = [];
+  renderUploadedFileChips();
+  updateFieldClearButtons();
+}
+
+function clearSourceDocuments() {
+  elements.sourceDocuments.value = "";
+  state.uploadedFiles = [];
+  renderUploadedFileChips();
+  updateFieldClearButtons();
+}
+
+function updateFieldClearButtons() {
+  elements.clearUserGoalButton.disabled = !elements.userGoal.value.trim();
+  elements.clearSourceDocumentsButton.disabled = !elements.sourceDocuments.value.trim();
 }
 
 function connectEventStream(runId) {
@@ -694,6 +737,7 @@ function renderTimelineDots() {
 }
 
 async function runDemoPipeline() {
+  populateDemoInputs();
   const runId = generateRunId();
   await executePipeline({
     runId,
