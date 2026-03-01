@@ -19,7 +19,7 @@ Every step goes through an audit loop. First the step runs with Mistral. Then Dr
 That turns the system from a black-box chain into an inspectable process. Instead of trusting the final answer blindly, the user sees a live trail of which step ran, what it produced, what was flagged, what was corrected, and whether the full pipeline is trustworthy enough to use.
 
 ## Demo
-[![Demo Video](https://img.shields.io/badge/Demo-YouTube-red)]([URL])
+[![Demo Video](https://img.shields.io/badge/Demo-YouTube-red)](https://youtu.be/2WB48ftD5xI?si=T2I5H1ch80_XZ1LA)
 
 ## Architecture
 ```text
