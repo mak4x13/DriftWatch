@@ -10,15 +10,15 @@ import math
 import os
 import re
 from collections import Counter
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from dotenv import load_dotenv
 from mistralai import Mistral
 from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential
 
 from backend.logging_utils import get_run_logger
-from backend.models import AuditIssue, AuditResult
-from backend.prompts import AUDITOR_SYSTEM_PROMPT
+from backend.models import AuditIssue, AuditResult, GeneratedPipelineStep
+from backend.prompts import AUDITOR_SYSTEM_PROMPT, PIPELINE_ARCHITECT_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 NUMERIC_TOKEN_PATTERN = r"(?<![A-Za-z0-9])\$?(?:\d+\.\d+|\d+)(?:B|M|%|x)?(?![A-Za-z0-9])"
@@ -49,26 +49,36 @@ class MistralClient:
         api_key = os.getenv("MISTRAL_API_KEY")
         self.client = Mistral(api_key=api_key) if api_key else None
         self.agent_model = "mistral-large-latest"
-        self.auditor_model = "mistral-large-latest"
+        self.auditor_model = "mistral-small-latest"
         self.embed_model = "mistral-embed"
 
-    async def run_agent_step(self, system: str, user: str, run_id: str | None = None) -> str:
+    async def run_agent_step(
+        self,
+        system: str,
+        user: str,
+        run_id: str | None = None,
+        on_token: Callable[[str, str], Awaitable[None]] | None = None,
+    ) -> str:
         """Execute one pipeline step with the agent model."""
 
         run_logger = get_run_logger(logger, run_id)
         try:
-            response = await self._chat_complete(
+            return await self._chat_stream(
                 model=self.agent_model,
                 system=system,
                 user=user,
                 temperature=0.3,
+                max_tokens=2048,
                 run_id=run_id,
                 operation_name="agent_step",
+                on_token=on_token,
             )
-            return self._extract_text_content(response).strip()
         except Exception as exc:
             run_logger.exception("Agent step failed: %s", exc)
-            return self._deterministic_agent_step(user)
+            fallback = self._deterministic_agent_step(user)
+            if on_token is not None and fallback:
+                await on_token(fallback, fallback)
+            return fallback
 
     async def run_auditor(self, audit_prompt: str, run_id: str | None = None) -> AuditResult:
         """Execute the auditor model and parse its JSON verdict."""
@@ -90,6 +100,7 @@ class MistralClient:
                 system=AUDITOR_SYSTEM_PROMPT.strip(),
                 user=audit_prompt,
                 temperature=0.0,
+                max_tokens=800,
                 run_id=run_id,
                 operation_name="auditor",
             )
@@ -143,19 +154,21 @@ class MistralClient:
             for issue in issues
         )
         prompt = (
-            "Rewrite the flagged output so it remains concise, grounded, and "
-            "consistent with the supplied sources.\n\n"
+            "Rewrite the following text. For each issue listed, replace the incorrect "
+            "claim with the correct value from the source documents. Return only the "
+            "corrected text with no explanation.\n\n"
             f"Flagged output:\n{original}\n\n"
             f"Issues to fix:\n{issue_lines or '- None provided'}\n\n"
             f"Sources:\n{sources}\n\n"
-            "Return only the corrected text."
+            "Keep every correction explicit and sourced."
         )
         try:
             response = await self._chat_complete(
                 model=self.agent_model,
-                system="You are a precise editor. Remove or qualify unverified claims.",
+                system="You are a precise editor. Replace every incorrect claim with the sourced value.",
                 user=prompt,
                 temperature=0.2,
+                max_tokens=2048,
                 run_id=run_id,
                 operation_name="autofix",
             )
@@ -164,6 +177,49 @@ class MistralClient:
         except Exception as exc:
             run_logger.exception("Autofix call failed: %s", exc)
             return self._deterministic_autofix(original=original, issues=issues, sources=sources)
+
+    async def generate_pipeline_steps(
+        self,
+        user_goal: str,
+        source_documents: list[str],
+        run_id: str | None = None,
+    ) -> list[GeneratedPipelineStep]:
+        """Generate 3-4 sequential pipeline steps for a custom user request."""
+
+        run_logger = get_run_logger(logger, run_id)
+        source_preview = "\n\n".join(source_documents).strip()[:500]
+        user_prompt = f"User goal:\n{user_goal}\n\nSource documents preview:\n{source_preview}"
+
+        try:
+            response = await self._chat_complete(
+                model=self.agent_model,
+                system=PIPELINE_ARCHITECT_SYSTEM_PROMPT,
+                user=user_prompt,
+                temperature=0.0,
+                run_id=run_id,
+                operation_name="generate_pipeline_steps",
+            )
+            payload_text = self._extract_text_content(response)
+            payload = json.loads(self._strip_json_fence(payload_text))
+            if not isinstance(payload, list):
+                raise ValueError("Pipeline architect response was not a JSON array.")
+
+            steps = [
+                GeneratedPipelineStep(
+                    step_name=self._truncate_step_name(str(item.get("step_name", "")).strip()),
+                    instruction=str(item.get("instruction", "")).strip(),
+                )
+                for item in payload
+                if isinstance(item, dict)
+                and str(item.get("step_name", "")).strip()
+                and str(item.get("instruction", "")).strip()
+            ]
+            if steps:
+                return steps[:4]
+            raise ValueError("Pipeline architect returned no usable steps.")
+        except Exception as exc:
+            run_logger.exception("Pipeline step generation failed: %s", exc)
+            return self._deterministic_pipeline_steps(user_goal=user_goal, source_documents=source_documents)
 
     async def embed(self, texts: list[str], run_id: str | None = None) -> list[list[float]]:
         """Embed text with Mistral, falling back to deterministic local vectors."""
@@ -211,6 +267,7 @@ class MistralClient:
         system: str,
         user: str,
         temperature: float,
+        max_tokens: int | None = None,
         run_id: str | None = None,
         operation_name: str = "chat_completion",
     ) -> Any:
@@ -223,6 +280,7 @@ class MistralClient:
             return self.client.chat.complete(
                 model=model,
                 temperature=temperature,
+                max_tokens=max_tokens,
                 messages=[
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
@@ -234,6 +292,49 @@ class MistralClient:
             run_id=run_id,
             operation_name=operation_name,
         )
+
+    async def _chat_stream(
+        self,
+        model: str,
+        system: str,
+        user: str,
+        temperature: float,
+        max_tokens: int | None = None,
+        run_id: str | None = None,
+        operation_name: str = "chat_stream",
+        on_token: Callable[[str, str], Awaitable[None]] | None = None,
+    ) -> str:
+        """Stream a chat completion and forward partial text as it arrives."""
+
+        if self.client is None:
+            raise RuntimeError("MISTRAL_API_KEY is not configured.")
+
+        async def _call() -> Any:
+            return await self.client.chat.stream_async(
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+            )
+
+        stream = await self._run_async_with_retry(
+            operation=_call,
+            run_id=run_id,
+            operation_name=operation_name,
+        )
+
+        fragments: list[str] = []
+        async for event in stream:
+            delta = self._extract_stream_delta(event)
+            if not delta:
+                continue
+            fragments.append(delta)
+            if on_token is not None:
+                await on_token(delta, "".join(fragments))
+        return "".join(fragments).strip()
 
     async def _run_with_retry(
         self,
@@ -252,6 +353,26 @@ class MistralClient:
         ):
             with attempt:
                 return await asyncio.to_thread(operation)
+
+        raise RuntimeError(f"{operation_name} failed after retries.")
+
+    async def _run_async_with_retry(
+        self,
+        operation: Callable[[], Awaitable[Any]],
+        run_id: str | None,
+        operation_name: str,
+    ) -> Any:
+        """Execute an async SDK operation with retry handling."""
+
+        async for attempt in AsyncRetrying(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=2, min=2, max=8),
+            retry=retry_if_exception(self._is_retryable_mistral_error),
+            reraise=True,
+            before_sleep=self._before_sleep(run_id=run_id, operation_name=operation_name),
+        ):
+            with attempt:
+                return await operation()
 
         raise RuntimeError(f"{operation_name} failed after retries.")
 
@@ -285,6 +406,29 @@ class MistralClient:
                     parts.append(text)
             return "\n".join(parts)
         return str(content or "")
+
+    def _extract_stream_delta(self, event: Any) -> str:
+        """Extract the incremental text delta from a stream event."""
+
+        chunk = getattr(event, "data", None)
+        if chunk is None and isinstance(event, dict):
+            chunk = event.get("data", {})
+
+        choices = getattr(chunk, "choices", None)
+        if choices is None and isinstance(chunk, dict):
+            choices = chunk.get("choices", [])
+        if not choices:
+            return ""
+
+        first_choice = choices[0]
+        delta = getattr(first_choice, "delta", None)
+        if delta is None and isinstance(first_choice, dict):
+            delta = first_choice.get("delta", {})
+
+        content = getattr(delta, "content", None)
+        if content is None and isinstance(delta, dict):
+            content = delta.get("content")
+        return content if isinstance(content, str) else ""
 
     def _strip_json_fence(self, payload_text: str) -> str:
         """Remove Markdown code fences around a JSON payload if present."""
@@ -369,6 +513,63 @@ class MistralClient:
         if summary_sentences:
             return " ".join(summary_sentences)
         return context[:500] or "No input context was available for this step."
+
+    def _deterministic_pipeline_steps(
+        self,
+        user_goal: str,
+        source_documents: list[str],
+    ) -> list[GeneratedPipelineStep]:
+        """Return stable fallback pipeline steps if the architect call fails."""
+
+        goal = user_goal.lower()
+        source_blob = "\n".join(source_documents).lower()
+
+        if "legal" in goal or "contract" in source_blob:
+            return [
+                GeneratedPipelineStep(
+                    step_name="Clause Extractor",
+                    instruction="Extract the key obligations, deadlines, parties, and legal clauses from the source documents.",
+                ),
+                GeneratedPipelineStep(
+                    step_name="Risk Reviewer",
+                    instruction="Identify the highest-risk legal terms or ambiguities that could affect the reader.",
+                ),
+                GeneratedPipelineStep(
+                    step_name="Summary Writer",
+                    instruction="Write a concise grounded summary using only the extracted clauses and verified risks.",
+                ),
+            ]
+
+        if "article" in goal or "fact-check" in goal or "fact check" in goal:
+            return [
+                GeneratedPipelineStep(
+                    step_name="Fact Extractor",
+                    instruction="Extract all verifiable names, dates, figures, and concrete claims from the source documents.",
+                ),
+                GeneratedPipelineStep(
+                    step_name="Claim Reviewer",
+                    instruction="Compare the requested output against the extracted facts and identify unsupported or missing claims.",
+                ),
+                GeneratedPipelineStep(
+                    step_name="Final Writer",
+                    instruction="Write a corrected final response using only the verified claims from the source documents.",
+                ),
+            ]
+
+        return [
+            GeneratedPipelineStep(
+                step_name="Source Extractor",
+                instruction="Extract the most important grounded facts, metrics, and named entities from the source documents.",
+            ),
+            GeneratedPipelineStep(
+                step_name="Evidence Summarizer",
+                instruction="Summarize the extracted evidence into a concise intermediate brief without adding unsupported claims.",
+            ),
+            GeneratedPipelineStep(
+                step_name="Final Writer",
+                instruction="Write the final answer using only the summarized evidence and the original user goal.",
+            ),
+        ]
 
     def _local_embedding(self, text: str, dimension: int = 128) -> list[float]:
         """Create a deterministic local embedding for offline fallback mode."""
@@ -506,6 +707,11 @@ class MistralClient:
         except (TypeError, ValueError):
             return 0.0
         return max(0.0, min(1.0, numeric))
+
+    def _truncate_step_name(self, value: str) -> str:
+        """Trim generated step names down to at most four words."""
+
+        return " ".join(value.split()[:4]).strip()
 
     def _best_fallback_replacement(
         self, claim: str, source_numbers: list[str]

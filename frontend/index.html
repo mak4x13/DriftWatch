@@ -64,7 +64,7 @@
 
     <main class="app-shell">
       <header class="hero">
-        <div>
+        <div class="hero-copy">
           <p class="eyebrow">Mistral Worldwide Hackathon 2026</p>
           <h1>DriftWatch</h1>
           <p class="subtitle">AI That Catches AI Lying</p>
@@ -77,7 +77,7 @@
             <section class="protection-panel protection-panel-hero">
               <div class="protection-copy">
                 <h3>DriftWatch Protection</h3>
-                <p>Toggle live guardrails on or off.</p>
+                <p>Toggle guardrails on or off before you run the pipeline.</p>
               </div>
               <label class="protection-switch">
                 <input type="checkbox" id="protectionToggle" checked />
@@ -102,53 +102,59 @@
         <section class="panel panel-input">
           <div class="panel-heading">
             <h2>Define Your Pipeline</h2>
-            <p>Load a template, tune the steps, and choose whether DriftWatch protects the run.</p>
+            <p>Set the goal, provide sources, then run the demo or a custom audited pipeline.</p>
           </div>
+          <div class="panel-body panel-input-body">
+            <div class="panel-scroll panel-input-scroll">
+              <label class="field">
+                <span>User Goal</span>
+                <textarea
+                  id="userGoal"
+                  rows="4"
+                  placeholder="Analyze TechCorp Q3 earnings and write analyst report"
+                ></textarea>
+              </label>
 
-          <div class="template-toolbar">
-            <label class="field template-field">
-              <span>Load Template</span>
-              <select id="templateSelect"></select>
-            </label>
-            <div class="field template-action">
-              <button type="button" id="savePipelineButton" class="ghost-button save-button">
-                Save Pipeline
+              <div class="field">
+                <span>Source Documents</span>
+                <div
+                  id="uploadZone"
+                  class="upload-zone"
+                  role="button"
+                  tabindex="0"
+                  aria-controls="fileInput"
+                  aria-label="Drop files here or click to upload"
+                >
+                  <div class="upload-zone-copy">
+                    <strong>Drop files here or click to upload</strong>
+                    <span>Supports .txt, .pdf, and .md files</span>
+                  </div>
+                </div>
+                <input
+                  id="fileInput"
+                  class="file-input"
+                  type="file"
+                  accept=".txt,.pdf,.md,text/plain,text/markdown,application/pdf"
+                  multiple
+                />
+                <div id="uploadedFileChips" class="uploaded-file-chips" aria-live="polite"></div>
+                <textarea
+                  id="sourceDocuments"
+                  rows="10"
+                  placeholder="Paste source documents here. Separate documents with a blank line."
+                ></textarea>
+              </div>
+            </div>
+
+            <div class="button-row run-actions">
+              <button type="button" id="runDemoButton" class="action-button demo-button">
+                Run Demo Pipeline
+              </button>
+              <button type="button" id="runCustomButton" class="action-button custom-button">
+                Run Custom Pipeline
               </button>
             </div>
           </div>
-
-          <label class="field">
-            <span>User Goal</span>
-            <textarea
-              id="userGoal"
-              rows="4"
-              placeholder="Analyze TechCorp Q3 earnings and write analyst report"
-            ></textarea>
-          </label>
-
-          <div class="button-row run-actions">
-            <button type="button" id="runDemoButton" class="action-button demo-button">
-              Run Demo Pipeline
-            </button>
-            <button type="button" id="runCustomButton" class="action-button custom-button">
-              Run Custom Pipeline
-            </button>
-          </div>
-
-          <label class="field">
-            <span>Source Documents</span>
-            <textarea
-              id="sourceDocuments"
-              rows="10"
-              placeholder="Paste source documents here. Separate documents with a blank line."
-            ></textarea>
-          </label>
-
-          <div class="steps-header">
-            <span>Pipeline Steps</span>
-            <button type="button" id="addStepButton" class="ghost-button">Add Step</button>
-          </div>
-          <div id="stepsContainer" class="steps-list"></div>
         </section>
 
         <section class="panel panel-stream">
@@ -156,10 +162,12 @@
             <h2>Live Audit Log</h2>
             <p>Watch each step execute, get audited, and self-correct in real time.</p>
           </div>
-          <div id="streamStatus" class="stream-status">Waiting for pipeline run.</div>
-          <div class="stream-layout">
-            <aside id="stepTimeline" class="step-timeline"></aside>
-            <div id="eventFeed" class="event-feed"></div>
+          <div class="panel-body">
+            <div id="streamStatus" class="stream-status">Waiting for pipeline run.</div>
+            <div id="streamScrollArea" class="stream-layout">
+              <aside id="stepTimeline" class="step-timeline"></aside>
+              <div id="eventFeed" class="event-feed"></div>
+            </div>
           </div>
         </section>
 
@@ -173,63 +181,44 @@
               Export Audit Trail
             </button>
           </div>
+          <div class="panel-body">
+            <div class="stats-bar">
+              <div class="stat-card">
+                <span class="stat-label">Steps</span>
+                <strong id="statSteps">0</strong>
+              </div>
+              <div class="stat-card">
+                <span class="stat-label">Hallucinations</span>
+                <strong id="statHallucinations">0</strong>
+              </div>
+              <div class="stat-card">
+                <span class="stat-label">Corrections</span>
+                <strong id="statCorrections">0</strong>
+              </div>
+            </div>
 
-          <div class="stats-bar">
-            <div class="stat-card">
-              <span class="stat-label">Steps</span>
-              <strong id="statSteps">0</strong>
+            <div class="gauge-card">
+              <div class="gauge-header">
+                <span>Overall Drift Score</span>
+                <strong id="driftScoreLabel">0.00</strong>
+              </div>
+              <div class="gauge-track">
+                <div id="driftGaugeFill" class="gauge-fill"></div>
+              </div>
             </div>
-            <div class="stat-card">
-              <span class="stat-label">Hallucinations</span>
-              <strong id="statHallucinations">0</strong>
-            </div>
-            <div class="stat-card">
-              <span class="stat-label">Corrections</span>
-              <strong id="statCorrections">0</strong>
-            </div>
+
+            <div id="trustBadge" class="trust-badge neutral">Awaiting run</div>
+
+            <article id="finalOutput" class="final-output">
+              <p>Final pipeline output will appear here once the run finishes.</p>
+            </article>
           </div>
-
-          <div class="gauge-card">
-            <div class="gauge-header">
-              <span>Overall Drift Score</span>
-              <strong id="driftScoreLabel">0.00</strong>
-            </div>
-            <div class="gauge-track">
-              <div id="driftGaugeFill" class="gauge-fill"></div>
-            </div>
-          </div>
-
-          <div id="trustBadge" class="trust-badge neutral">Awaiting run</div>
-
-          <article id="finalOutput" class="final-output">
-            <p>Final pipeline output will appear here once the run finishes.</p>
-          </article>
         </section>
       </section>
     </main>
 
-    <template id="stepTemplate">
-      <article class="step-card">
-        <div class="step-card-head">
-          <span class="step-index"></span>
-          <button type="button" class="remove-step ghost-button">Remove</button>
-        </div>
-        <label class="field">
-          <span>Step Name</span>
-          <input type="text" class="step-name" placeholder="Research Summarizer" />
-        </label>
-        <label class="field">
-          <span>Instruction</span>
-          <textarea
-            class="step-instruction"
-            rows="4"
-            placeholder="Summarize the key facts from the context."
-          ></textarea>
-        </label>
-      </article>
-    </template>
-
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
     <script src="./app.js" defer></script>
   </body>
 </html>

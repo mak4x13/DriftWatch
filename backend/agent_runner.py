@@ -28,7 +28,8 @@ async def run_pipeline(
     final_output = ""
 
     try:
-        await ingest_sources(request.source_documents, request.run_id)
+        if request.driftwatch_enabled:
+            await ingest_sources(request.source_documents, request.run_id)
 
         for step in request.steps:
             resolved_context = _resolve_input_context(
@@ -52,10 +53,23 @@ async def run_pipeline(
                 },
             )
 
+            async def _stream_agent_text(delta: str, content: str) -> None:
+                await _emit_event(
+                    event_queue=event_queue,
+                    event_type="STEP_TOKEN",
+                    step_id=step.step_id,
+                    data={
+                        "step_name": step.name,
+                        "delta": delta,
+                        "content": content,
+                    },
+                )
+
             original_output = await mistral.run_agent_step(
                 system=system_prompt,
                 user=user_prompt,
                 run_id=request.run_id,
+                on_token=_stream_agent_text,
             )
 
             await _emit_event(
@@ -81,6 +95,8 @@ async def run_pipeline(
                     update={
                         "step_id": step.step_id,
                         "step_name": step.name,
+                        "detected_hallucinations": _count_hallucination_issues(audit_result.issues),
+                        "corrected_hallucinations": 0,
                     }
                 )
             else:
@@ -94,6 +110,8 @@ async def run_pipeline(
                     original_output=original_output,
                     final_output=original_output,
                     auto_fixed=False,
+                    detected_hallucinations=0,
+                    corrected_hallucinations=0,
                 )
 
             run_logger.info(
@@ -111,6 +129,8 @@ async def run_pipeline(
 
             final_step_output = original_output
             auto_fixed = False
+            working_audit_result = audit_result
+            detected_hallucinations = audit_result.detected_hallucinations
             if (
                 request.driftwatch_enabled
                 and audit_result.verdict == "FLAG"
@@ -119,23 +139,52 @@ async def run_pipeline(
                 for _ in range(2):
                     candidate = await autofix_step(
                         original_output=final_step_output,
-                        audit_result=audit_result,
+                        audit_result=working_audit_result,
                         sources=request.source_documents,
                         mistral=mistral,
                         run_id=request.run_id,
                     )
-                    if candidate.strip() and candidate.strip() != final_step_output.strip():
-                        final_step_output = candidate.strip()
+                    candidate = candidate.strip()
+                    if not candidate or candidate == final_step_output.strip():
+                        break
+
+                    final_step_output = candidate
+                    corrected_hallucinations = _count_corrected_hallucinations(
+                        audit_result.issues,
+                        final_step_output,
+                    )
+                    reaudited_result = await audit_step(
+                        step_output=final_step_output,
+                        user_goal=request.user_goal,
+                        previous_outputs=previous_outputs,
+                        run_id=request.run_id,
+                        mistral=mistral,
+                    )
+                    working_audit_result = reaudited_result.model_copy(
+                        update={
+                            "step_id": step.step_id,
+                            "step_name": step.name,
+                            "original_output": original_output,
+                            "final_output": final_step_output,
+                            "detected_hallucinations": detected_hallucinations,
+                            "corrected_hallucinations": corrected_hallucinations,
+                        }
+                    )
+                    if (
+                        working_audit_result.verdict == "PASS"
+                        and corrected_hallucinations >= detected_hallucinations
+                    ):
                         auto_fixed = True
+                        working_audit_result = working_audit_result.model_copy(
+                            update={
+                                "auto_fixed": True,
+                                "drift_score": 0.1,
+                            }
+                        )
                         break
 
                 if auto_fixed:
-                    audit_result = audit_result.model_copy(
-                        update={
-                            "final_output": final_step_output,
-                            "auto_fixed": True,
-                        }
-                    )
+                    audit_result = working_audit_result
                     await _emit_event(
                         event_queue=event_queue,
                         event_type="AUTOFIX",
@@ -148,12 +197,21 @@ async def run_pipeline(
                         },
                     )
                 else:
-                    audit_result = audit_result.model_copy(
-                        update={"final_output": final_step_output}
+                    audit_result = working_audit_result.model_copy(
+                        update={
+                            "final_output": final_step_output,
+                            "auto_fixed": False,
+                        }
                     )
             else:
                 audit_result = audit_result.model_copy(
-                    update={"final_output": final_step_output}
+                    update={
+                        "final_output": final_step_output,
+                        "corrected_hallucinations": _count_corrected_hallucinations(
+                            audit_result.issues,
+                            final_step_output,
+                        ),
+                    }
                 )
 
             audit_results.append(audit_result)
@@ -204,7 +262,13 @@ def _build_step_prompt(
             "Use only facts explicitly supported by the verified source documents "
             "or the provided input context. Do not invent or calculate new numbers, "
             "comparisons, placeholders, recommendations, dates, tickers, or causal "
-            "claims unless they are explicitly stated. If a detail is missing, omit it."
+            "claims unless they are explicitly stated. If a detail is missing, omit it. "
+            "You must only use information explicitly present in the provided source "
+            "documents and previous step outputs. If specific information is not "
+            "available in the sources, explicitly state: [NOT IN SOURCES: this "
+            "information was not provided in the source documents]. Never infer, "
+            "estimate, or use external knowledge to fill gaps. It is better to "
+            "acknowledge missing information than to fabricate it."
         )
         user_prompt = (
             f"User goal:\n{request.user_goal}\n\n"
@@ -225,7 +289,10 @@ def _build_step_prompt(
 
     system_prompt = (
         "You are a workflow step in a multi-stage AI pipeline. "
-        "Follow the instruction using the supplied input context."
+        "Follow the instruction using the supplied input context. "
+        "When the step instruction explicitly asks for a demo-specific behavior, "
+        "follow that instruction exactly, even if it conflicts with the source "
+        "documents. Do not add explanations about rule conflicts unless asked."
     )
     user_prompt = (
         f"User goal:\n{request.user_goal}\n\n"
@@ -270,24 +337,43 @@ def _build_pipeline_result(
         else max(effective_scores, default=0.0)
     )
     total_hallucinations = sum(
-        1
-        for result in audit_results
-        for issue in result.issues
-        if issue.type == "HALLUCINATION"
-    )
-    total_corrections = sum(1 for result in audit_results if result.auto_fixed)
-    unresolved_high = any(
-        not result.auto_fixed
-        and any(issue.severity == "HIGH" for issue in result.issues)
+        result.detected_hallucinations or _count_hallucination_issues(result.issues)
         for result in audit_results
     )
-    trustworthy = (
-        request.driftwatch_enabled
-        and overall_drift_score < 0.4
-        and not unresolved_high
+    total_corrections = sum(
+        _resolved_hallucinations_for_result(result)
+        for result in audit_results
     )
     final_output = audit_results[-1].final_output if audit_results else ""
-    overall_verdict = "TRUSTWORTHY" if trustworthy else "REVIEW_REQUIRED"
+    has_not_in_sources = "[NOT IN SOURCES" in final_output
+    uncorrected_hallucinations = max(total_hallucinations - total_corrections, 0)
+    unresolved_ratio = (
+        uncorrected_hallucinations / total_hallucinations
+        if total_hallucinations
+        else 0.0
+    )
+
+    if request.driftwatch_enabled and overall_drift_score < 0.35 and not has_not_in_sources:
+        overall_verdict = "TRUSTWORTHY"
+    elif (
+        request.driftwatch_enabled
+        and (
+            0.35 <= overall_drift_score <= 0.65
+            or (total_corrections < total_hallucinations and overall_drift_score < 0.5)
+            or has_not_in_sources
+        )
+    ):
+        overall_verdict = "PARTIALLY_VERIFIED"
+    elif (
+        not request.driftwatch_enabled
+        or overall_drift_score > 0.65
+        or unresolved_ratio > 0.5
+    ):
+        overall_verdict = "REVIEW_REQUIRED"
+    else:
+        overall_verdict = "PARTIALLY_VERIFIED"
+
+    trustworthy = overall_verdict == "TRUSTWORTHY"
 
     return PipelineResult(
         run_id=request.run_id,
@@ -301,6 +387,35 @@ def _build_pipeline_result(
         overall_verdict=overall_verdict,
         driftwatch_enabled=request.driftwatch_enabled,
     )
+
+
+def _count_hallucination_issues(issues: list) -> int:
+    """Count hallucination issues on a step result."""
+
+    return sum(1 for issue in issues if getattr(issue, "type", "") == "HALLUCINATION")
+
+
+def _count_corrected_hallucinations(issues: list, final_output: str) -> int:
+    """Count hallucination claims that no longer appear in the final output."""
+
+    corrected = 0
+    for issue in issues:
+        if getattr(issue, "type", "") != "HALLUCINATION":
+            continue
+        claim = getattr(issue, "claim", "").strip()
+        if claim and claim not in final_output:
+            corrected += 1
+    return corrected
+
+
+def _resolved_hallucinations_for_result(result: AuditResult) -> int:
+    """Infer how many hallucination claims were corrected for one step."""
+
+    if result.corrected_hallucinations:
+        return result.corrected_hallucinations
+    if result.auto_fixed:
+        return result.detected_hallucinations or _count_hallucination_issues(result.issues)
+    return _count_corrected_hallucinations(result.issues, result.final_output)
 
 
 async def _emit_event(

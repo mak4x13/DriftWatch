@@ -17,7 +17,14 @@ from sse_starlette.sse import EventSourceResponse
 from backend.agent_runner import run_pipeline
 from backend.logging_utils import get_run_logger
 from backend.mistral_client import MistralClient
-from backend.models import AuditEvent, PipelineRequest, PipelineResult, SourceDocument
+from backend.models import (
+    AuditEvent,
+    PipelineRequest,
+    PipelineResult,
+    SourceDocument,
+    StepGenerationRequest,
+    StepGenerationResponse,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -75,6 +82,34 @@ async def run_pipeline_route(request: PipelineRequest) -> PipelineResult:
     except Exception as exc:
         run_logger.exception("Pipeline route failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/pipeline/generate-steps", response_model=StepGenerationResponse)
+async def generate_pipeline_steps_route(
+    request: StepGenerationRequest,
+) -> StepGenerationResponse:
+    """Generate custom pipeline steps from a user goal and source document preview."""
+
+    _validate_source_documents(request.source_documents)
+    if not request.user_goal.strip():
+        raise HTTPException(status_code=400, detail="A user goal is required.")
+
+    mistral = _get_mistral_client()
+    run_logger = get_run_logger(logger, request.run_id)
+    try:
+        steps = await mistral.generate_pipeline_steps(
+            user_goal=request.user_goal,
+            source_documents=request.source_documents,
+            run_id=request.run_id,
+        )
+    except Exception as exc:
+        run_logger.exception("Step generation route failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    if not steps:
+        raise HTTPException(status_code=500, detail="Unable to generate pipeline steps.")
+
+    return StepGenerationResponse(run_id=request.run_id, steps=steps)
 
 
 @app.get("/api/pipeline/stream/{run_id}")
@@ -231,14 +266,10 @@ def _get_mistral_client() -> MistralClient:
 def _validate_pipeline_request(request: PipelineRequest) -> None:
     """Validate required pipeline inputs before execution starts."""
 
-    if not any(document.strip() for document in request.source_documents):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Source documents are required for hallucination detection. "
-                "Please provide at least one source document."
-            ),
-        )
+    _validate_source_documents(request.source_documents)
+
+    if not request.steps:
+        raise HTTPException(status_code=400, detail="At least one pipeline step is required.")
 
     for step in request.steps:
         if len(step.instruction.strip()) < 20:
@@ -246,3 +277,18 @@ def _validate_pipeline_request(request: PipelineRequest) -> None:
                 status_code=400,
                 detail="Step instructions must be at least 20 characters to be meaningful.",
             )
+
+
+def _validate_source_documents(source_documents: list[str]) -> None:
+    """Validate that at least one non-empty source document was supplied."""
+
+    if any(document.strip() for document in source_documents):
+        return
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "Source documents are required for hallucination detection. "
+            "Please provide at least one source document."
+        ),
+    )

@@ -18,3 +18,11 @@ Respond ONLY in this exact JSON format:
    "summary": "one sentence plain English summary" }
 Flag if drift_score > 0.3 or any HIGH severity issue exists.
 """
+
+PIPELINE_ARCHITECT_SYSTEM_PROMPT = (
+    "You are a pipeline architect. Given a user goal and source documents, "
+    "decompose the task into 3-4 sequential steps. Return ONLY a valid JSON array. "
+    "Each object must have exactly two keys: step_name (string, max 4 words) and "
+    "instruction (string, one clear sentence telling the agent what to do at this "
+    "step). No explanation, no markdown, just the JSON array."
+)

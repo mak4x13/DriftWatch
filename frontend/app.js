@@ -1,104 +1,4 @@
-const STORAGE_KEY = "driftwatch.savedPipelines";
 const EMPTY_OUTPUT_MARKUP = "<p>Final pipeline output will appear here once the run finishes.</p>";
-
-const demoDocuments = [
-  "TechCorp Q3 2024 Earnings: Revenue reached $3.2B, up 12% YoY. CEO stated: expansion into Asian markets drove growth.",
-  "Market Analysis: TechCorp faces headwinds from rising chip costs. Analyst consensus price target: $142. Current P/E ratio: 24x.",
-  "Competitor Report: RivalCorp posted $2.8B revenue same quarter. TechCorp maintains 53% market share in enterprise segment.",
-  "TechCorp Product Update: New AI chip released Q3, volume sales expected Q1 2026. R&D spend increased 18% this quarter.",
-  "Economic Context: Fed rate unchanged. Tech sector up 4% this quarter. Inflation at 2.8%.",
-];
-
-const templateDefinitions = {
-  financial_research: {
-    label: "Financial Research Report",
-    userGoal: "Analyze TechCorp Q3 performance and write analyst report",
-    sourceDocuments: demoDocuments,
-    steps: [
-      {
-        name: "Key Facts Extractor",
-        instruction: "Extract all key financial facts and metrics from the provided context.",
-      },
-      {
-        name: "Financial Summarizer",
-        instruction:
-          "Summarize the financial performance. NOTE: You will hallucinate here for demo purposes - state that revenue was $4.7B (the real figure is $3.2B).",
-      },
-      {
-        name: "Analyst Report Writer",
-        instruction:
-          "Write a professional analyst report based only on the summary and the verified facts. Do not add unsupported comparisons or invented estimates.",
-      },
-    ],
-    driftwatchEnabled: true,
-  },
-  legal_summary: {
-    label: "Legal Document Summary",
-    userGoal: "Summarize the contract obligations, deadlines, and risk clauses for a legal reviewer",
-    sourceDocuments: [
-      "Master Services Agreement, Section 3: Vendor must deliver monthly compliance reports by the fifth business day of each month. Either party may terminate for uncured material breach after 30 days written notice.",
-      "Data Processing Addendum, Section 7: Personal data must be deleted within 45 days of contract termination unless retention is required by law.",
-      "Statement of Work, Milestones: Phase 1 acceptance testing closes on June 30, 2026. Final invoice is payable net 30 after written acceptance.",
-    ],
-    steps: [
-      {
-        name: "Clause Extractor",
-        instruction:
-          "Extract the contractual obligations, deadlines, termination rights, and payment terms from the provided legal materials.",
-      },
-      {
-        name: "Risk Summarizer",
-        instruction:
-          "Summarize the highest-risk legal obligations and note where deadlines or termination clauses could affect the client.",
-      },
-      {
-        name: "Reviewer Memo Writer",
-        instruction:
-          "Write a concise legal reviewer memo using only the grounded contract facts and clearly label any operational risk.",
-      },
-    ],
-    driftwatchEnabled: true,
-  },
-  content_fact_checker: {
-    label: "Content Fact-Checker",
-    userGoal: "Verify a draft article against provided source notes and produce a corrected publish-ready version",
-    sourceDocuments: [
-      "Source Note 1: The city opened the Riverfront Innovation Center on March 12, 2026. Mayor Elena Park announced the center supports 42 local startups.",
-      "Source Note 2: The center cost $18M to build and was funded through municipal bonds plus a state innovation grant.",
-      "Source Note 3: The article should note that phase two of the project begins in September 2026 and is still pending approval.",
-    ],
-    steps: [
-      {
-        name: "Fact Extractor",
-        instruction:
-          "Extract all verifiable dates, names, figures, and pending milestones from the source notes.",
-      },
-      {
-        name: "Draft Fact Checker",
-        instruction:
-          "Check a draft article against the extracted facts and identify any unsupported claims or missing qualifiers.",
-      },
-      {
-        name: "Corrected Article Writer",
-        instruction:
-          "Write a publish-ready corrected article using only verified facts from the source notes and clearly label pending items.",
-      },
-    ],
-    driftwatchEnabled: true,
-  },
-  custom_blank: {
-    label: "Custom (blank)",
-    userGoal: "",
-    sourceDocuments: [""],
-    steps: [
-      {
-        name: "",
-        instruction: "",
-      },
-    ],
-    driftwatchEnabled: true,
-  },
-};
 
 const state = {
   eventSource: null,
@@ -109,7 +9,8 @@ const state = {
   currentSteps: [],
   stepStatus: {},
   protectionEnabled: true,
-  activeTemplate: "financial_research",
+  uploadedFiles: [],
+  uploadDragDepth: 0,
 };
 
 const elements = {
@@ -120,18 +21,17 @@ const elements = {
   liveBadge: document.getElementById("liveBadge"),
   liveBadgeState: document.getElementById("liveBadgeState"),
   resetDemoButton: document.getElementById("resetDemoButton"),
-  templateSelect: document.getElementById("templateSelect"),
-  savePipelineButton: document.getElementById("savePipelineButton"),
   userGoal: document.getElementById("userGoal"),
   sourceDocuments: document.getElementById("sourceDocuments"),
-  stepsContainer: document.getElementById("stepsContainer"),
-  stepTemplate: document.getElementById("stepTemplate"),
-  addStepButton: document.getElementById("addStepButton"),
+  uploadZone: document.getElementById("uploadZone"),
+  fileInput: document.getElementById("fileInput"),
+  uploadedFileChips: document.getElementById("uploadedFileChips"),
   protectionToggle: document.getElementById("protectionToggle"),
   protectionState: document.getElementById("protectionState"),
   runDemoButton: document.getElementById("runDemoButton"),
   runCustomButton: document.getElementById("runCustomButton"),
   streamStatus: document.getElementById("streamStatus"),
+  streamScrollArea: document.getElementById("streamScrollArea"),
   stepTimeline: document.getElementById("stepTimeline"),
   eventFeed: document.getElementById("eventFeed"),
   statSteps: document.getElementById("statSteps"),
@@ -146,11 +46,11 @@ const elements = {
 
 document.addEventListener("DOMContentLoaded", () => {
   configureMarked();
-  rebuildTemplateOptions();
-  applyPipelineConfig(templateDefinitions.financial_research);
+  configurePdfJs();
   bindEvents();
   resetRunState(null);
   updateProtectionState();
+  renderUploadedFileChips();
 });
 
 function configureMarked() {
@@ -162,10 +62,14 @@ function configureMarked() {
   }
 }
 
+function configurePdfJs() {
+  if (window.pdfjsLib && window.pdfjsLib.GlobalWorkerOptions) {
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  }
+}
+
 function bindEvents() {
-  elements.addStepButton.addEventListener("click", () => addStepCard());
-  elements.templateSelect.addEventListener("change", handleTemplateSelection);
-  elements.savePipelineButton.addEventListener("click", savePipeline);
   elements.protectionToggle.addEventListener("change", () => {
     state.protectionEnabled = elements.protectionToggle.checked;
     updateProtectionState();
@@ -176,90 +80,70 @@ function bindEvents() {
   elements.exportButton.addEventListener("click", exportAuditTrail);
   elements.helpToggle.addEventListener("click", toggleHelpSidebar);
   elements.helpCloseButton.addEventListener("click", closeHelpSidebar);
+  bindUploadEvents();
 }
 
-function handleTemplateSelection() {
-  const value = elements.templateSelect.value;
-  if (!value) {
-    return;
-  }
+function bindUploadEvents() {
+  elements.uploadZone.addEventListener("click", (event) => {
+    event.preventDefault();
+    elements.fileInput.click();
+  });
 
-  if (value.startsWith("saved:")) {
-    const savedPipeline = getSavedPipelines().find((entry) => `saved:${entry.id}` === value);
-    if (savedPipeline) {
-      applyPipelineConfig(savedPipeline);
-      state.activeTemplate = value;
+  elements.uploadZone.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      elements.fileInput.click();
     }
-    return;
-  }
-
-  const template = templateDefinitions[value];
-  if (!template) {
-    return;
-  }
-
-  applyPipelineConfig(template);
-  state.activeTemplate = value;
-}
-
-function applyPipelineConfig(config) {
-  elements.userGoal.value = config.userGoal || "";
-  elements.sourceDocuments.value = (config.sourceDocuments || []).join("\n\n");
-  elements.stepsContainer.innerHTML = "";
-  (config.steps || []).forEach((step) => addStepCard(step));
-  if (!config.steps || !config.steps.length) {
-    addStepCard();
-  }
-
-  state.protectionEnabled =
-    config.driftwatchEnabled !== undefined ? Boolean(config.driftwatchEnabled) : true;
-  elements.protectionToggle.checked = state.protectionEnabled;
-  updateProtectionState();
-  updateStepIndices();
-}
-
-function addStepCard(step = { name: "", instruction: "" }) {
-  const fragment = elements.stepTemplate.content.cloneNode(true);
-  const card = fragment.querySelector(".step-card");
-  const nameInput = fragment.querySelector(".step-name");
-  const instructionInput = fragment.querySelector(".step-instruction");
-  const removeButton = fragment.querySelector(".remove-step");
-
-  nameInput.value = step.name || "";
-  instructionInput.value = step.instruction || "";
-  removeButton.addEventListener("click", () => {
-    card.remove();
-    updateStepIndices();
   });
 
-  elements.stepsContainer.appendChild(fragment);
-  updateStepIndices();
-}
-
-function updateStepIndices() {
-  const cards = [...elements.stepsContainer.querySelectorAll(".step-card")];
-  cards.forEach((card, index) => {
-    const badge = card.querySelector(".step-index");
-    badge.textContent = index + 1;
+  elements.fileInput.addEventListener("change", async (event) => {
+    await handleUploadedFiles(event.target.files);
+    elements.fileInput.value = "";
   });
-}
 
-function collectSteps() {
-  return [...elements.stepsContainer.querySelectorAll(".step-card")]
-    .map((card, index) => {
-      const name = card.querySelector(".step-name").value.trim();
-      const instruction = card.querySelector(".step-instruction").value.trim();
-      if (!name || !instruction) {
-        return null;
+  elements.fileInput.addEventListener("click", (event) => {
+    event.stopPropagation();
+  });
+
+  elements.uploadZone.addEventListener("dragenter", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    state.uploadDragDepth += 1;
+    elements.uploadZone.classList.add("upload-zone-active");
+  });
+
+  elements.uploadZone.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    elements.uploadZone.classList.add("upload-zone-active");
+  });
+
+  ["dragleave", "dragend"].forEach((eventName) => {
+    elements.uploadZone.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      state.uploadDragDepth = Math.max(0, state.uploadDragDepth - 1);
+      if (state.uploadDragDepth === 0) {
+        elements.uploadZone.classList.remove("upload-zone-active");
       }
-      return {
-        step_id: `step_${index + 1}`,
-        name,
-        instruction,
-        input_context: index === 0 ? "[SOURCE DOCUMENTS INJECTED]" : "[PREVIOUS STEP OUTPUT]",
-      };
-    })
-    .filter(Boolean);
+    });
+  });
+
+  elements.uploadZone.addEventListener("drop", async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    state.uploadDragDepth = 0;
+    elements.uploadZone.classList.remove("upload-zone-active");
+    await handleUploadedFiles(event.dataTransfer?.files);
+  });
+
+  elements.uploadedFileChips.addEventListener("click", (event) => {
+    const removeButton = event.target.closest("[data-remove-upload]");
+    if (!removeButton) {
+      return;
+    }
+    removeUploadedFile(removeButton.dataset.removeUpload);
+  });
 }
 
 function parseSourceDocuments(rawValue) {
@@ -269,85 +153,166 @@ function parseSourceDocuments(rawValue) {
     .filter(Boolean);
 }
 
-async function runDemoPipeline() {
-  const demoTemplate = templateDefinitions.financial_research;
-  applyPipelineConfig({
-    ...demoTemplate,
-    driftwatchEnabled: state.protectionEnabled,
-  });
-
-  const runId = generateRunId();
-  const steps = buildStepsFromTemplate(demoTemplate.steps);
-  const sourceDocuments = [...demoTemplate.sourceDocuments];
-  const userGoal = demoTemplate.userGoal;
-
-  await executePipeline({
-    runId,
-    steps,
-    url:
-      `/api/pipeline/demo?run_id=${encodeURIComponent(runId)}` +
-      `&driftwatch_enabled=${encodeURIComponent(String(state.protectionEnabled))}`,
-    fetchOptions: { method: "POST" },
-  });
-}
-
-async function runCustomPipeline() {
-  const steps = collectSteps();
-  const sourceDocuments = parseSourceDocuments(elements.sourceDocuments.value);
-  const userGoal = elements.userGoal.value.trim();
-
-  if (!userGoal || !steps.length || !sourceDocuments.length) {
-    showError(
-      "Provide a user goal, at least one source document, and at least one complete step."
-    );
+async function handleUploadedFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length) {
     return;
   }
 
-  const runId = generateRunId();
-  const payload = {
-    run_id: runId,
-    user_goal: userGoal,
-    steps,
-    source_documents: sourceDocuments,
-    auto_fix: true,
-    driftwatch_enabled: state.protectionEnabled,
-  };
+  hideError();
+  elements.uploadZone.classList.add("upload-zone-busy");
 
-  await executePipeline({
-    runId,
-    steps,
-    url: "/api/pipeline/run",
-    fetchOptions: {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    },
+  const results = await Promise.allSettled(files.map((file) => readUploadedFile(file)));
+  const failures = [];
+
+  results.forEach((result, index) => {
+    if (result.status === "fulfilled") {
+      appendUploadedDocument(files[index], result.value);
+      return;
+    }
+    failures.push(files[index]?.name || `file ${index + 1}`);
+  });
+
+  elements.uploadZone.classList.remove("upload-zone-busy");
+
+  if (failures.length) {
+    showError(`Unable to read: ${failures.join(", ")}. Upload .txt, .md, or .pdf files only.`);
+  }
+}
+
+async function readUploadedFile(file) {
+  const extension = file.name.split(".").pop()?.toLowerCase() || "";
+  if (extension === "txt" || extension === "md") {
+    return readTextFile(file);
+  }
+  if (extension === "pdf") {
+    return extractPdfText(file);
+  }
+  throw new Error(`Unsupported file type: ${file.name}`);
+}
+
+function readTextFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error(`Unable to read ${file.name}`));
+    reader.readAsText(file);
   });
 }
 
-async function executePipeline({ runId, steps, url, fetchOptions }) {
-  hideError();
-  resetRunState(runId, steps);
-  setRunning(true);
-  connectEventStream(runId);
-
-  try {
-    const response = await fetch(url, fetchOptions);
-    if (!response.ok) {
-      throw new Error(await parseApiError(response));
-    }
-
-    const result = await response.json();
-    state.result = result;
-    renderPipelineResult(result);
-    elements.streamStatus.textContent = "Pipeline run completed.";
-  } catch (error) {
-    showError(error.message || "Pipeline run failed.");
-    renderSyntheticError(error);
-    elements.streamStatus.textContent = "Pipeline run failed.";
-  } finally {
-    setRunning(false);
+async function extractPdfText(file) {
+  if (!window.pdfjsLib) {
+    throw new Error("PDF parser failed to load.");
   }
+
+  const buffer = await file.arrayBuffer();
+  const pdf = await window.pdfjsLib.getDocument({ data: buffer }).promise;
+  const pageTexts = [];
+
+  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+    const page = await pdf.getPage(pageNumber);
+    const textContent = await page.getTextContent();
+    const pageText = textContent.items
+      .map((item) => String(item.str || "").trim())
+      .filter(Boolean)
+      .join(" ");
+    pageTexts.push(pageText);
+  }
+
+  return pageTexts.join("\n\n");
+}
+
+function appendUploadedDocument(file, content) {
+  const normalizedContent = String(content || "").replace(/\r\n?/g, "\n").trim();
+  if (!normalizedContent) {
+    return;
+  }
+
+  const fileLabel = nextUploadedFileLabel(file.name);
+  const block = buildUploadedFileBlock(fileLabel, normalizedContent);
+  const existingValue = elements.sourceDocuments.value.trimEnd();
+  elements.sourceDocuments.value = existingValue ? `${existingValue}\n\n${block}` : block;
+
+  state.uploadedFiles.push({
+    id: cryptoSafeId(),
+    name: file.name,
+    label: fileLabel,
+  });
+  renderUploadedFileChips();
+}
+
+function nextUploadedFileLabel(fileName) {
+  const baseMatches = state.uploadedFiles.filter((entry) => entry.name === fileName).length;
+  return baseMatches ? `${fileName} (${baseMatches + 1})` : fileName;
+}
+
+function buildUploadedFileBlock(fileLabel, content) {
+  return [
+    `----- Uploaded File: ${fileLabel} -----`,
+    content,
+    `----- End Uploaded File: ${fileLabel} -----`,
+  ].join("\n");
+}
+
+function renderUploadedFileChips() {
+  if (!state.uploadedFiles.length) {
+    elements.uploadedFileChips.innerHTML = "";
+    elements.uploadedFileChips.hidden = true;
+    return;
+  }
+
+  elements.uploadedFileChips.hidden = false;
+  elements.uploadedFileChips.innerHTML = state.uploadedFiles
+    .map(
+      (file) => `
+        <div class="file-chip">
+          <span class="file-chip-name">${escapeHtml(file.label)}</span>
+          <button
+            type="button"
+            class="file-chip-remove"
+            data-remove-upload="${escapeHtml(file.id)}"
+            aria-label="Remove ${escapeHtml(file.label)}"
+          >
+            ×
+          </button>
+        </div>
+      `
+    )
+    .join("");
+}
+
+function removeUploadedFile(fileId) {
+  const file = state.uploadedFiles.find((entry) => entry.id === fileId);
+  if (!file) {
+    return;
+  }
+
+  elements.sourceDocuments.value = removeUploadedBlock(elements.sourceDocuments.value, file.label);
+  state.uploadedFiles = state.uploadedFiles.filter((entry) => entry.id !== fileId);
+  renderUploadedFileChips();
+}
+
+function removeUploadedBlock(sourceText, fileLabel) {
+  const escapedLabel = escapeRegExp(fileLabel);
+  const blockPattern = new RegExp(
+    `(?:\\n{0,2})----- Uploaded File: ${escapedLabel} -----\\n[\\s\\S]*?\\n----- End Uploaded File: ${escapedLabel} -----(?:\\n{0,2})`,
+    "g"
+  );
+  return String(sourceText || "")
+    .replace(blockPattern, "\n\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function cryptoSafeId() {
+  if (window.crypto && typeof window.crypto.randomUUID === "function") {
+    return window.crypto.randomUUID();
+  }
+  return `upload-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function connectEventStream(runId) {
@@ -356,6 +321,7 @@ function connectEventStream(runId) {
   state.eventSource = new EventSource(`/api/pipeline/stream/${encodeURIComponent(runId)}`);
   state.eventSource.onmessage = (event) => {
     const payload = JSON.parse(event.data);
+    registerStepFromEvent(payload);
     state.events.push(payload);
     renderEvent(payload);
     updateTimelineFromEvent(payload);
@@ -364,98 +330,6 @@ function connectEventStream(runId) {
     }
   };
   state.eventSource.onerror = closeEventStream;
-}
-
-function renderEvent(event) {
-  const card = document.createElement("article");
-  const issueClass = primaryIssueClass(event);
-  card.className = `event-card ${classNameForEvent(event)} ${issueClass}`.trim();
-  card.innerHTML = renderEventMarkup(event);
-
-  elements.eventFeed.appendChild(card);
-  activateCardGauges(card);
-  elements.eventFeed.scrollTop = elements.eventFeed.scrollHeight;
-}
-
-function renderEventMarkup(event) {
-  if (event.event_type === "STEP_START") {
-    const stepName = event.data.step_name || event.step_id;
-    elements.streamStatus.textContent = `Running ${stepName}...`;
-    return renderStepEventCard({
-      badge: renderStepBadge(event),
-      title: `Running ${escapeHtml(stepName)}`,
-      body: renderMarkdownBlock(event.data.instruction || "", { compact: true }),
-      timestamp: event.timestamp,
-    });
-  }
-
-  if (event.event_type === "STEP_COMPLETE") {
-    return renderStepEventCard({
-      badge: renderStepBadge(event),
-      title: "Step Complete",
-      body: renderMarkdownBlock(event.data.output_preview || "", { compact: true }),
-      timestamp: event.timestamp,
-    });
-  }
-
-  if (event.event_type === "AUDIT_RESULT") {
-    const audit = event.data;
-    const isPass = audit.verdict === "PASS";
-    return renderStepEventCard({
-      badge: renderStepBadge(event),
-      title: `${isPass ? "PASS" : "FLAGGED"} - ${renderInlineMarkdown(audit.summary || "")}`,
-      body: `
-        ${renderInlineGauge(audit.drift_score || 0)}
-        ${isPass ? "" : renderIssuesMarkup(audit.issues || [])}
-      `,
-      timestamp: event.timestamp,
-      metaBadge: `Drift ${Number(audit.drift_score || 0).toFixed(2)}`,
-    });
-  }
-
-  if (event.event_type === "AUTOFIX") {
-    return renderStepEventCard({
-      badge: renderStepBadge(event),
-      title: "AUTO-FIX APPLIED",
-      body: renderMarkdownBlock(event.data.summary || "", { compact: true }),
-      timestamp: event.timestamp,
-    });
-  }
-
-  if (event.event_type === "PIPELINE_DONE") {
-    const data = event.data;
-    return renderStepEventCard({
-      badge: '<div class="step-pill pipeline-pill">Pipeline Summary</div>',
-      title: data.pipeline_trustworthy ? "PIPELINE TRUSTWORTHY" : "REVIEW REQUIRED",
-      body: `
-        ${renderInlineGauge(data.overall_drift_score || 0)}
-        <p>${escapeHtml(
-          `${data.total_hallucinations} hallucination(s) caught, ${data.total_corrections} correction(s) applied.`
-        )}</p>
-      `,
-      timestamp: event.timestamp,
-      metaBadge: escapeHtml(data.overall_verdict || "REVIEW_REQUIRED"),
-    });
-  }
-
-  return renderStepEventCard({
-    badge: renderStepBadge(event),
-    title: "Pipeline Error",
-    body: `<p>${escapeHtml(event.data.message || "Unknown error")}</p>`,
-    timestamp: event.timestamp,
-  });
-}
-
-function renderStepEventCard({ badge, title, body, timestamp, metaBadge = "" }) {
-  return `
-    ${badge}
-    <h3>${title}</h3>
-    ${body}
-    <div class="event-meta">
-      <span>${formatTimestamp(timestamp)}</span>
-      ${metaBadge ? `<span class="drift-badge">${metaBadge}</span>` : ""}
-    </div>
-  `;
 }
 
 function renderStepBadge(event) {
@@ -525,46 +399,7 @@ function activateCardGauges(card) {
   });
 }
 
-function updateTimelineFromEvent(event) {
-  if (!state.currentSteps.length) {
-    return;
-  }
-
-  if (event.event_type === "STEP_START") {
-    state.stepStatus[event.step_id] = "active";
-  } else if (event.event_type === "AUDIT_RESULT") {
-    state.stepStatus[event.step_id] = event.data.verdict === "FLAG" ? "flag" : "pass";
-  } else if (event.event_type === "ERROR" && event.step_id !== "pipeline") {
-    state.stepStatus[event.step_id] = "flag";
-  }
-
-  renderTimeline();
-}
-
-function renderTimeline() {
-  if (!state.currentSteps.length) {
-    elements.stepTimeline.innerHTML = '<p class="timeline-empty">Pipeline steps will appear here.</p>';
-    return;
-  }
-
-  elements.stepTimeline.innerHTML = state.currentSteps
-    .map((step, index) => {
-      const status = state.stepStatus[step.step_id] || "pending";
-      return `
-        <div class="timeline-item timeline-${status}">
-          <div class="timeline-line"></div>
-          <div class="timeline-circle">${timelineGlyph(status, index + 1)}</div>
-          <div class="timeline-copy">
-            <div class="timeline-title">Step ${index + 1}</div>
-            <div class="timeline-name">${escapeHtml(step.name)}</div>
-          </div>
-        </div>
-      `;
-    })
-    .join("");
-}
-
-function timelineGlyph(status, index) {
+function legacyTimelineGlyph(status, index) {
   if (status === "pass") return "✓";
   if (status === "flag") return "X";
   return String(index);
@@ -577,12 +412,8 @@ function renderPipelineResult(result) {
   elements.driftScoreLabel.textContent = Number(result.overall_drift_score || 0).toFixed(2);
   animateGauge(elements.driftGaugeFill, Number(result.overall_drift_score || 0));
 
-  elements.trustBadge.className = `trust-badge ${
-    result.pipeline_trustworthy ? "trustworthy" : "review"
-  }`;
-  elements.trustBadge.textContent = result.pipeline_trustworthy
-    ? "PIPELINE TRUSTWORTHY"
-    : "REVIEW REQUIRED";
+  elements.trustBadge.className = `trust-badge ${trustBadgeClass(result.overall_verdict)}`;
+  elements.trustBadge.textContent = trustBadgeLabel(result.overall_verdict);
 
   const unresolvedClaims = result.audit_results
     .filter((entry) => entry.verdict === "FLAG" && !entry.auto_fixed)
@@ -601,43 +432,6 @@ function renderSyntheticError(error) {
     data: { message: error.message || String(error) },
     timestamp: new Date().toISOString(),
   });
-}
-
-function resetRunState(runId, steps = state.currentSteps) {
-  state.runId = runId;
-  state.events = [];
-  state.result = null;
-  state.currentSteps = steps || [];
-  state.stepStatus = Object.fromEntries((state.currentSteps || []).map((step) => [step.step_id, "pending"]));
-
-  elements.eventFeed.innerHTML = "";
-  elements.streamStatus.textContent = runId
-    ? `Listening for events on run ${runId}...`
-    : "Waiting for pipeline run.";
-  elements.statSteps.textContent = "0";
-  elements.statHallucinations.textContent = "0";
-  elements.statCorrections.textContent = "0";
-  elements.driftScoreLabel.textContent = "0.00";
-  animateGauge(elements.driftGaugeFill, 0);
-  elements.trustBadge.className = "trust-badge neutral";
-  elements.trustBadge.textContent = "Awaiting run";
-  elements.finalOutput.innerHTML = EMPTY_OUTPUT_MARKUP;
-  elements.exportButton.disabled = true;
-  renderTimeline();
-}
-
-function setRunning(isRunning) {
-  state.running = isRunning;
-  elements.runDemoButton.disabled = isRunning;
-  elements.runCustomButton.disabled = isRunning;
-  elements.addStepButton.disabled = isRunning;
-  elements.savePipelineButton.disabled = isRunning;
-  elements.templateSelect.disabled = isRunning;
-  elements.resetDemoButton.disabled = isRunning;
-  elements.protectionToggle.disabled = isRunning;
-  elements.liveBadge.classList.toggle("running", isRunning);
-  elements.liveBadge.classList.toggle("idle", !isRunning);
-  elements.liveBadgeState.textContent = isRunning ? "Live" : "Idle";
 }
 
 function updateProtectionState() {
@@ -720,20 +514,6 @@ function exportAuditTrail() {
   URL.revokeObjectURL(url);
 }
 
-async function resetDemoState() {
-  hideError();
-  try {
-    const response = await fetch("/api/demo/reset", { method: "POST" });
-    if (!response.ok) {
-      throw new Error(await parseApiError(response));
-    }
-    resetRunState(null, state.currentSteps);
-    elements.streamStatus.textContent = "Demo state reset successfully.";
-  } catch (error) {
-    showError(error.message || "Unable to reset the demo state.");
-  }
-}
-
 function closeEventStream() {
   if (!state.eventSource) {
     return;
@@ -749,7 +529,10 @@ function renderMarkdownBlock(text, options = {}) {
     return "<p>No output returned.</p>";
   }
 
-  const markedSource = applyClaimMarkers(source, options.highlightClaims || []);
+  const markedSource = applyClaimMarkers(
+    normalizeOrderedListNumbering(source),
+    options.highlightClaims || []
+  );
   if (window.marked) {
     const html = window.marked.parse(markedSource);
     const compactClass = options.compact ? " compact" : "";
@@ -784,6 +567,24 @@ function applyClaimMarkers(text, issues) {
   return markedText;
 }
 
+function normalizeOrderedListNumbering(text) {
+  const lines = String(text || "").split("\n");
+  let orderedIndex = 0;
+
+  return lines
+    .map((line) => {
+      const match = line.match(/^(\s*)(\d+)\.\s+(.*)$/);
+      if (!match) {
+        orderedIndex = 0;
+        return line;
+      }
+
+      orderedIndex += 1;
+      return `${match[1]}${orderedIndex}. ${match[3]}`;
+    })
+    .join("\n");
+}
+
 function showError(message) {
   elements.alertBanner.hidden = false;
   elements.alertBanner.textContent = message;
@@ -804,80 +605,6 @@ function closeHelpSidebar() {
   elements.helpSidebar.classList.remove("open");
   elements.helpSidebar.setAttribute("aria-hidden", "true");
   elements.helpToggle.setAttribute("aria-expanded", "false");
-}
-
-function getSavedPipelines() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch (error) {
-    return [];
-  }
-}
-
-function savePipeline() {
-  const steps = collectSteps();
-  const sourceDocuments = parseSourceDocuments(elements.sourceDocuments.value);
-  const userGoal = elements.userGoal.value.trim();
-  const name = window.prompt("Name this pipeline");
-
-  if (!name) {
-    return;
-  }
-
-  const savedPipelines = getSavedPipelines();
-  savedPipelines.push({
-    id: generateRunId(),
-    label: name.trim(),
-    userGoal,
-    sourceDocuments,
-    steps: steps.map((step) => ({
-      name: step.name,
-      instruction: step.instruction,
-    })),
-    driftwatchEnabled: state.protectionEnabled,
-  });
-
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(savedPipelines));
-  rebuildTemplateOptions(`saved:${savedPipelines[savedPipelines.length - 1].id}`);
-}
-
-function rebuildTemplateOptions(selectedValue = state.activeTemplate) {
-  const savedPipelines = getSavedPipelines();
-  elements.templateSelect.innerHTML = "";
-
-  const templateGroup = document.createElement("optgroup");
-  templateGroup.label = "Templates";
-  Object.entries(templateDefinitions).forEach(([value, template]) => {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = template.label;
-    templateGroup.appendChild(option);
-  });
-  elements.templateSelect.appendChild(templateGroup);
-
-  if (savedPipelines.length) {
-    const savedGroup = document.createElement("optgroup");
-    savedGroup.label = "Saved Pipelines";
-    savedPipelines.forEach((entry) => {
-      const option = document.createElement("option");
-      option.value = `saved:${entry.id}`;
-      option.textContent = entry.label;
-      savedGroup.appendChild(option);
-    });
-    elements.templateSelect.appendChild(savedGroup);
-  }
-
-  elements.templateSelect.value = selectedValue;
-}
-
-function buildStepsFromTemplate(steps) {
-  return steps.map((step, index) => ({
-    step_id: `step_${index + 1}`,
-    name: step.name,
-    instruction: step.instruction,
-    input_context: index === 0 ? "[SOURCE DOCUMENTS INJECTED]" : "[PREVIOUS STEP OUTPUT]",
-  }));
 }
 
 function parseApiError(response) {
@@ -918,4 +645,440 @@ function generateRunId() {
     return window.crypto.randomUUID();
   }
   return `run-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function buildPipelineSteps(steps) {
+  return (steps || [])
+    .map((step) => {
+      const stepName = String(step.step_name || step.name || "").trim();
+      const instruction = String(step.instruction || "").trim();
+      if (!stepName || !instruction) {
+        return null;
+      }
+      return {
+        step_name: stepName,
+        instruction,
+      };
+    })
+    .filter(Boolean)
+    .map((step, index) => ({
+    step_id: `step_${index + 1}`,
+    name: step.step_name,
+    instruction: step.instruction,
+    input_context: index === 0 ? "[SOURCE DOCUMENTS INJECTED]" : "[PREVIOUS STEP OUTPUT]",
+  }));
+}
+
+function clearActiveStepCards(stepId) {
+  [...elements.eventFeed.querySelectorAll(".event-card.event-loading")].forEach((card) => {
+    if (card.dataset.stepId === stepId) {
+      card.classList.remove("event-loading");
+    }
+  });
+}
+
+function renderCardLoader() {
+  return `
+    <span class="card-loader" aria-hidden="true">
+      <span></span><span></span><span></span>
+    </span>
+  `;
+}
+
+function renderTimelineDots() {
+  return `
+    <span class="timeline-dots" aria-hidden="true">
+      <span></span><span></span><span></span>
+    </span>
+  `;
+}
+
+async function runDemoPipeline() {
+  const runId = generateRunId();
+  await executePipeline({
+    runId,
+    steps: [],
+    url:
+      `/api/pipeline/demo?run_id=${encodeURIComponent(runId)}` +
+      `&driftwatch_enabled=${encodeURIComponent(String(state.protectionEnabled))}`,
+    fetchOptions: { method: "POST" },
+  });
+}
+
+async function runCustomPipeline() {
+  const userGoal = elements.userGoal.value.trim();
+  const sourceDocuments = parseSourceDocuments(elements.sourceDocuments.value);
+
+  if (!userGoal || !sourceDocuments.length) {
+    showError("Provide a user goal and at least one source document before running.");
+    return;
+  }
+
+  const runId = generateRunId();
+
+  hideError();
+  setRunning(true);
+  elements.streamStatus.textContent = "Generating custom pipeline steps...";
+
+  try {
+    const generatedSteps = await generatePipelineSteps({
+      runId,
+      userGoal,
+      sourceDocuments,
+    });
+
+    const steps = buildPipelineSteps(generatedSteps);
+    await executePipeline({
+      runId,
+      steps,
+      url: "/api/pipeline/run",
+      fetchOptions: {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          run_id: runId,
+          user_goal: userGoal,
+          steps,
+          source_documents: sourceDocuments,
+          auto_fix: true,
+          driftwatch_enabled: state.protectionEnabled,
+        }),
+      },
+      keepRunning: true,
+    });
+  } catch (error) {
+    elements.streamStatus.textContent = "Pipeline step generation failed.";
+    showError(error.message || "Unable to generate pipeline steps.");
+    renderSyntheticError(error);
+  } finally {
+    setRunning(false);
+  }
+}
+
+async function generatePipelineSteps({ runId, userGoal, sourceDocuments }) {
+  const response = await fetch("/api/pipeline/generate-steps", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      run_id: runId,
+      user_goal: userGoal,
+      source_documents: sourceDocuments,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+
+  const payload = await response.json();
+  const steps = buildPipelineSteps(payload.steps || []).map((step) => ({
+    step_name: step.name,
+    instruction: step.instruction,
+  }));
+  if (!steps.length) {
+    throw new Error("No pipeline steps were generated.");
+  }
+  return steps;
+}
+
+async function executePipeline({ runId, steps, url, fetchOptions, keepRunning = false }) {
+  hideError();
+  resetRunState(runId, steps);
+  if (!keepRunning) {
+    setRunning(true);
+  }
+  connectEventStream(runId);
+
+  try {
+    const response = await fetch(url, fetchOptions);
+    if (!response.ok) {
+      throw new Error(await parseApiError(response));
+    }
+
+    const result = await response.json();
+    state.result = result;
+    renderPipelineResult(result);
+    elements.streamStatus.textContent = "Pipeline run completed.";
+  } catch (error) {
+    showError(error.message || "Pipeline run failed.");
+    renderSyntheticError(error);
+    elements.streamStatus.textContent = "Pipeline run failed.";
+  } finally {
+    setRunning(false);
+  }
+}
+
+function renderEvent(event) {
+  if (event.event_type === "STEP_TOKEN") {
+    updateStreamingCard(event);
+    return;
+  }
+
+  if (event.step_id !== "pipeline" && event.event_type !== "STEP_START") {
+    clearActiveStepCards(event.step_id);
+  }
+
+  const card = document.createElement("article");
+  const issueClass = primaryIssueClass(event);
+  card.className = `event-card ${classNameForEvent(event)} ${issueClass}`.trim();
+  card.dataset.stepId = event.step_id;
+  card.dataset.eventType = event.event_type;
+  if (event.event_type === "STEP_START") {
+    card.classList.add("event-loading");
+  }
+  card.innerHTML = renderEventMarkup(event);
+
+  elements.eventFeed.appendChild(card);
+  activateCardGauges(card);
+  elements.streamScrollArea.scrollTop = elements.streamScrollArea.scrollHeight;
+}
+
+function renderEventMarkup(event) {
+  if (event.event_type === "STEP_START") {
+    const stepName = event.data.step_name || event.step_id;
+    elements.streamStatus.textContent = `Running ${stepName}...`;
+    return renderStepEventCard({
+      badge: renderStepBadge(event),
+      title: `Running ${escapeHtml(stepName)}`,
+      body: `
+        ${renderMarkdownBlock(event.data.instruction || "", { compact: true })}
+        <div class="stream-preview" data-stream-preview="${escapeHtml(event.step_id)}">
+          <p>Generating output...</p>
+        </div>
+      `,
+      timestamp: event.timestamp,
+      loading: true,
+    });
+  }
+
+  if (event.event_type === "STEP_COMPLETE") {
+    return renderStepEventCard({
+      badge: renderStepBadge(event),
+      title: "Step Complete",
+      body: renderMarkdownBlock(event.data.output_preview || "", { compact: true }),
+      timestamp: event.timestamp,
+    });
+  }
+
+  if (event.event_type === "AUDIT_RESULT") {
+    const audit = event.data;
+    const isPass = audit.verdict === "PASS";
+    return renderStepEventCard({
+      badge: renderStepBadge(event),
+      title: `${isPass ? "PASS" : "FLAGGED"} - ${renderInlineMarkdown(audit.summary || "")}`,
+      body: `
+        ${renderInlineGauge(audit.drift_score || 0)}
+        ${isPass ? "" : renderIssuesMarkup(audit.issues || [])}
+      `,
+      timestamp: event.timestamp,
+      metaBadge: `Drift ${Number(audit.drift_score || 0).toFixed(2)}`,
+    });
+  }
+
+  if (event.event_type === "AUTOFIX") {
+    return renderStepEventCard({
+      badge: renderStepBadge(event),
+      title: "AUTO-FIX APPLIED",
+      body: renderMarkdownBlock(event.data.summary || "", { compact: true }),
+      timestamp: event.timestamp,
+    });
+  }
+
+  if (event.event_type === "PIPELINE_DONE") {
+    const data = event.data;
+    return renderStepEventCard({
+      badge: '<div class="step-pill pipeline-pill">Pipeline Summary</div>',
+      title: trustBadgeLabel(data.overall_verdict),
+      body: `
+        ${renderInlineGauge(data.overall_drift_score || 0)}
+        <p>${escapeHtml(
+          `${data.total_hallucinations} hallucination(s) caught, ${data.total_corrections} correction(s) applied.`
+        )}</p>
+      `,
+      timestamp: event.timestamp,
+      metaBadge: escapeHtml(data.overall_verdict || "REVIEW_REQUIRED"),
+    });
+  }
+
+  return renderStepEventCard({
+    badge: renderStepBadge(event),
+    title: "Pipeline Error",
+    body: `<p>${escapeHtml(event.data.message || "Unknown error")}</p>`,
+    timestamp: event.timestamp,
+  });
+}
+
+function renderStepEventCard({ badge, title, body, timestamp, metaBadge = "", loading = false }) {
+  return `
+    ${badge}
+    <h3 class="event-title">
+      <span>${title}</span>
+      ${loading ? renderCardLoader() : ""}
+    </h3>
+    ${body}
+    <div class="event-meta">
+      <span>${formatTimestamp(timestamp)}</span>
+      ${metaBadge ? `<span class="drift-badge">${metaBadge}</span>` : ""}
+    </div>
+  `;
+}
+
+function updateStreamingCard(event) {
+  const card = findLatestLoadingCard(event.step_id);
+  if (!card) {
+    return;
+  }
+
+  const preview = card.querySelector("[data-stream-preview]");
+  if (preview) {
+    preview.innerHTML = renderMarkdownBlock(event.data.content || "", { compact: true });
+  }
+
+  const stepName = event.data.step_name || findStepById(event.step_id)?.name || event.step_id;
+  elements.streamStatus.textContent = `Streaming ${stepName}...`;
+}
+
+function findLatestLoadingCard(stepId) {
+  const cards = [...elements.eventFeed.querySelectorAll(".event-card.event-loading")];
+  return cards.reverse().find((card) => card.dataset.stepId === stepId) || null;
+}
+
+function registerStepFromEvent(event) {
+  if (!event || event.step_id === "pipeline") {
+    return;
+  }
+
+  const stepName = String(event.data?.step_name || "").trim();
+  if (!stepName) {
+    return;
+  }
+
+  if (findStepById(event.step_id)) {
+    return;
+  }
+
+  state.currentSteps.push({
+    step_id: event.step_id,
+    name: stepName,
+  });
+  state.currentSteps.sort((left, right) => stepOrder(left.step_id) - stepOrder(right.step_id));
+  state.stepStatus[event.step_id] = state.stepStatus[event.step_id] || "pending";
+  renderTimeline();
+}
+
+function stepOrder(stepId) {
+  const match = String(stepId || "").match(/(\d+)/);
+  return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
+}
+
+function updateTimelineFromEvent(event) {
+  if (!state.currentSteps.length) {
+    return;
+  }
+
+  if (event.event_type === "STEP_START") {
+    state.stepStatus[event.step_id] = "active";
+  } else if (event.event_type === "AUTOFIX") {
+    state.stepStatus[event.step_id] = "fixed";
+  } else if (event.event_type === "AUDIT_RESULT") {
+    state.stepStatus[event.step_id] = event.data.verdict === "FLAG" ? "flag" : "pass";
+  } else if (event.event_type === "ERROR" && event.step_id !== "pipeline") {
+    state.stepStatus[event.step_id] = "flag";
+  }
+
+  renderTimeline();
+}
+
+function renderTimeline() {
+  if (!state.currentSteps.length) {
+    elements.stepTimeline.innerHTML = '<p class="timeline-empty">Pipeline steps will appear here.</p>';
+    return;
+  }
+
+  elements.stepTimeline.innerHTML = state.currentSteps
+    .map((step, index) => {
+      const status = state.stepStatus[step.step_id] || "pending";
+      return `
+        <div class="timeline-item timeline-${status}">
+          <div class="timeline-line"></div>
+          <div class="timeline-circle">${timelineGlyph(status, index + 1)}</div>
+          <div class="timeline-copy">
+            <div class="timeline-title">Step ${index + 1}</div>
+            <div class="timeline-name-row">
+              <div class="timeline-name">${escapeHtml(step.name)}</div>
+              ${status === "active" ? renderTimelineDots() : ""}
+            </div>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function timelineGlyph(status, index) {
+  if (status === "active") return '<span class="timeline-spinner" aria-hidden="true"></span>';
+  if (status === "pass") return '<span class="timeline-glyph">&#10003;</span>';
+  if (status === "fixed") return '<span class="timeline-glyph timeline-wrench">&#128295;</span>';
+  if (status === "flag") return '<span class="timeline-glyph">&#10005;</span>';
+  return `<span class="timeline-glyph">${index}</span>`;
+}
+
+function trustBadgeLabel(verdict) {
+  if (verdict === "TRUSTWORTHY") return "PIPELINE TRUSTWORTHY";
+  if (verdict === "PARTIALLY_VERIFIED") return "PARTIALLY VERIFIED";
+  return "REVIEW REQUIRED";
+}
+
+function trustBadgeClass(verdict) {
+  if (verdict === "TRUSTWORTHY") return "trustworthy";
+  if (verdict === "PARTIALLY_VERIFIED") return "partial";
+  return "review";
+}
+
+function resetRunState(runId, steps = []) {
+  state.runId = runId;
+  state.events = [];
+  state.result = null;
+  state.currentSteps = steps || [];
+  state.stepStatus = Object.fromEntries((state.currentSteps || []).map((step) => [step.step_id, "pending"]));
+
+  elements.eventFeed.innerHTML = "";
+  elements.streamStatus.textContent = runId
+    ? `Listening for events on run ${runId}...`
+    : "Waiting for pipeline run.";
+  elements.statSteps.textContent = "0";
+  elements.statHallucinations.textContent = "0";
+  elements.statCorrections.textContent = "0";
+  elements.driftScoreLabel.textContent = "0.00";
+  animateGauge(elements.driftGaugeFill, 0);
+  elements.trustBadge.className = "trust-badge neutral";
+  elements.trustBadge.textContent = "Awaiting run";
+  elements.finalOutput.innerHTML = EMPTY_OUTPUT_MARKUP;
+  elements.exportButton.disabled = true;
+  renderTimeline();
+}
+
+function setRunning(isRunning) {
+  state.running = isRunning;
+  elements.runDemoButton.disabled = isRunning;
+  elements.runCustomButton.disabled = isRunning;
+  elements.resetDemoButton.disabled = isRunning;
+  elements.protectionToggle.disabled = isRunning;
+  elements.liveBadge.classList.toggle("running", isRunning);
+  elements.liveBadge.classList.toggle("idle", !isRunning);
+  elements.liveBadgeState.textContent = isRunning ? "Live" : "Idle";
+}
+
+async function resetDemoState() {
+  hideError();
+  try {
+    const response = await fetch("/api/demo/reset", { method: "POST" });
+    if (!response.ok) {
+      throw new Error(await parseApiError(response));
+    }
+    resetRunState(null);
+    elements.streamStatus.textContent = "Demo state reset successfully.";
+  } catch (error) {
+    showError(error.message || "Unable to reset the demo state.");
+  }
 }

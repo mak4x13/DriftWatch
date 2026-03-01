@@ -75,7 +75,8 @@ async def autofix_step(
         original=corrected or original_output,
         issues=audit_result.issues,
     )
-    return deterministic.strip() or original_output
+    sanitized = _repair_malformed_percentages(deterministic, audit_result.issues)
+    return sanitized.strip() or original_output
 
 
 async def _gather_source_context(step_output: str, run_id: str) -> list[str]:
@@ -145,6 +146,8 @@ def _run_rule_based_audit(
         original_output=step_output,
         final_output=step_output,
         auto_fixed=False,
+        detected_hallucinations=_count_hallucinations(issues),
+        corrected_hallucinations=0,
     )
 
 
@@ -349,12 +352,27 @@ def _merge_audit_results(
 
     issues = list(heuristic_result.issues)
     if issues:
-        drift_score = max(heuristic_result.drift_score, _score_issues(issues))
+        base_score = max(
+            llm_result.drift_score,
+            heuristic_result.drift_score,
+            _score_issues(issues),
+        )
+        drift_score = _adjust_drift_score(
+            base_score,
+            issues,
+        )
     else:
         issues = _dedupe_issues(
             [issue for issue in llm_result.issues if issue.severity == "HIGH"]
         )
-        drift_score = max(llm_result.drift_score if issues else 0.0, _score_issues(issues))
+        base_score = max(
+            llm_result.drift_score if issues else 0.0,
+            _score_issues(issues),
+        )
+        drift_score = _adjust_drift_score(
+            base_score,
+            issues,
+        )
 
     verdict = "FLAG" if _should_flag(issues) or drift_score > 0.3 else "PASS"
     summary = heuristic_result.summary
@@ -366,12 +384,14 @@ def _merge_audit_results(
     return AuditResult(
         step_id="",
         verdict=verdict,
-        drift_score=max(drift_score, _score_issues(issues)),
+        drift_score=drift_score,
         issues=issues,
         summary=summary,
         original_output=original_output,
         final_output=original_output,
         auto_fixed=False,
+        detected_hallucinations=_count_hallucinations(issues),
+        corrected_hallucinations=0,
     )
 
 
@@ -400,8 +420,24 @@ def _score_issues(issues: list[AuditIssue]) -> float:
 
     if not issues:
         return 0.0
-    weights = {"LOW": 0.15, "MEDIUM": 0.35, "HIGH": 0.75}
+    # Keep the base severity score moderate because volume is added separately.
+    weights = {"LOW": 0.1, "MEDIUM": 0.24, "HIGH": 0.55}
     return min(1.0, max(weights[issue.severity] for issue in issues))
+
+
+def _adjust_drift_score(auditor_score: float, issues: list[AuditIssue]) -> float:
+    """Increase drift when the volume of medium/high issues grows."""
+
+    high_count = sum(1 for issue in issues if issue.severity == "HIGH")
+    medium_count = sum(1 for issue in issues if issue.severity == "MEDIUM")
+    adjusted = auditor_score + (high_count * 0.08) + (medium_count * 0.03)
+    return min(0.95, adjusted)
+
+
+def _count_hallucinations(issues: list[AuditIssue]) -> int:
+    """Count hallucination issues in a step audit result."""
+
+    return sum(1 for issue in issues if issue.type == "HALLUCINATION")
 
 
 def _build_summary(issues: list[AuditIssue]) -> str:
@@ -541,11 +577,88 @@ def _apply_issue_replacements(original: str, issues: list[AuditIssue]) -> str:
     """Apply simple in-place replacements from issue suggestions."""
 
     corrected = original
-    for issue in issues:
+    hallucination_issues = sorted(
+        (issue for issue in issues if issue.type == "HALLUCINATION" and issue.claim),
+        key=lambda issue: len(issue.claim),
+        reverse=True,
+    )
+    for issue in hallucination_issues:
         replacement = _extract_suggested_value(issue.suggestion)
-        if issue.type == "HALLUCINATION" and replacement and issue.claim:
-            corrected = corrected.replace(issue.claim, replacement)
+        if replacement:
+            corrected = _replace_exact_claim(corrected, issue.claim, replacement)
     return corrected
+
+
+def _replace_exact_claim(text: str, claim: str, replacement: str) -> str:
+    """Replace a flagged claim as a full token rather than appending around it."""
+
+    pattern = re.compile(rf"(?<![A-Za-z0-9]){re.escape(claim)}(?![A-Za-z0-9])")
+    return pattern.sub(replacement, text)
+
+
+def _repair_malformed_percentages(text: str, issues: list[AuditIssue]) -> str:
+    """Repair clearly malformed business percentages introduced during autofix."""
+
+    percentage_candidates = [
+        _extract_suggested_value(issue.suggestion)
+        for issue in issues
+        if issue.type == "HALLUCINATION"
+    ]
+    percentage_candidates = [
+        candidate
+        for candidate in percentage_candidates
+        if candidate and candidate.endswith("%") and (_percentage_value(candidate) or 0.0) <= 200.0
+    ]
+    if not percentage_candidates:
+        return text
+
+    repaired = text
+    for match in list(re.finditer(r"(?<![A-Za-z0-9])\d+(?:\.\d+)?%(?![A-Za-z0-9])", repaired)):
+        observed = match.group(0)
+        if (_percentage_value(observed) or 0.0) <= 200.0:
+            continue
+
+        replacement = None
+        for issue in issues:
+            suggested = _extract_suggested_value(issue.suggestion)
+            if not suggested or not suggested.endswith("%"):
+                continue
+            if _looks_like_percentage_rendering_error(observed, issue.claim, suggested):
+                replacement = suggested
+                break
+
+        if replacement is None and len(set(percentage_candidates)) == 1:
+            replacement = percentage_candidates[0]
+        if replacement:
+            repaired = repaired.replace(observed, replacement, 1)
+    return repaired
+
+
+def _looks_like_percentage_rendering_error(observed: str, claim: str, replacement: str) -> bool:
+    """Heuristically detect concatenated percentage tokens such as 1211%."""
+
+    observed_digits = re.sub(r"\D", "", observed)
+    claim_digits = re.sub(r"\D", "", claim)
+    replacement_digits = re.sub(r"\D", "", replacement)
+    if not observed_digits or not replacement_digits:
+        return False
+    if claim_digits and claim_digits in observed_digits:
+        return True
+    if replacement_digits in observed_digits:
+        return True
+    return (
+        len(observed_digits) > len(replacement_digits)
+        and observed_digits.startswith(replacement_digits[:2])
+    )
+
+
+def _percentage_value(value: str) -> float | None:
+    """Parse a percentage token into a numeric value."""
+
+    match = re.search(r"\d+(?:\.\d+)?", value)
+    if not match:
+        return None
+    return float(match.group(0))
 
 
 def _extract_entities(text: str) -> set[str]:

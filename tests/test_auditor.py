@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from backend.agent_runner import _build_pipeline_result
-from backend.auditor import _extract_claim_candidates, audit_step, autofix_step
+from backend.auditor import _adjust_drift_score, _extract_claim_candidates, audit_step, autofix_step
 from backend.models import AuditIssue, AuditResult, PipelineRequest, PipelineStep
 
 
@@ -152,10 +152,104 @@ def test_build_pipeline_result_uses_post_fix_drift_for_trust() -> None:
     assert result.overall_drift_score == 0.1
     assert result.pipeline_trustworthy is True
     assert result.overall_verdict == "TRUSTWORTHY"
+    assert result.total_corrections == 1
 
 
-def test_build_pipeline_result_requires_review_with_unresolved_high_issue() -> None:
-    """Unresolved high-severity issues should force review required."""
+def test_adjusted_drift_score_scales_with_issue_volume() -> None:
+    """Many medium/high issues should sharply increase the post-processed drift score."""
+
+    issues = [
+        AuditIssue(
+            type="HALLUCINATION",
+            severity="HIGH",
+            claim=f"${index}.0M",
+            reason="Unsupported figure.",
+            suggestion="Replace with a sourced value.",
+        )
+        for index in range(4)
+    ] + [
+        AuditIssue(
+            type="CONTRADICTION",
+            severity="MEDIUM",
+            claim="Revenue claim mismatch.",
+            reason="Conflicts with prior output.",
+            suggestion="Use the sourced value.",
+        )
+    ]
+
+    adjusted = _adjust_drift_score(0.15, issues)
+
+    assert adjusted == 0.5
+
+
+@pytest.mark.asyncio
+async def test_audit_step_single_high_issue_does_not_overstate_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single grounded hallucination flag should not spike drift into catastrophic range."""
+
+    async def fake_query_sources(claim: str, run_id: str, n_results: int = 3) -> list[str]:
+        return ["TechCorp Q3 2024 Earnings: Revenue reached $3.2B, up 12% YoY."]
+
+    monkeypatch.setattr("backend.auditor.query_sources", fake_query_sources)
+
+    result = await audit_step(
+        step_output="TechCorp delivered $4.7B in revenue.",
+        user_goal="Analyze TechCorp Q3 performance and write analyst report",
+        previous_outputs=[],
+        run_id="single-high-run",
+        mistral=FakeMistral(),
+    )
+
+    assert result.verdict == "FLAG"
+    assert result.drift_score == 0.63
+
+
+@pytest.mark.asyncio
+async def test_autofix_step_repairs_malformed_percentage_rendering() -> None:
+    """Autofix should repair concatenated business percentages such as 1211%."""
+
+    class BrokenPercentMistral:
+        async def run_autofix(
+            self,
+            original: str,
+            issues: list[AuditIssue],
+            sources: str,
+            run_id: str | None = None,
+        ) -> str:
+            return "Net Revenue Retention (NRR): 1211%"
+
+    audit_result = AuditResult(
+        step_id="step_2",
+        verdict="FLAG",
+        drift_score=0.75,
+        issues=[
+            AuditIssue(
+                type="HALLUCINATION",
+                severity="HIGH",
+                claim="11%",
+                reason="Unsupported retention figure.",
+                suggestion="Replace with 124%.",
+            )
+        ],
+        summary="Hallucination detected.",
+        original_output="Net Revenue Retention (NRR): 11%",
+        final_output="Net Revenue Retention (NRR): 11%",
+        auto_fixed=False,
+    )
+
+    corrected = await autofix_step(
+        original_output="Net Revenue Retention (NRR): 11%",
+        audit_result=audit_result,
+        sources=["Net Revenue Retention (NRR): 124%"],
+        mistral=BrokenPercentMistral(),
+    )
+
+    assert corrected == "Net Revenue Retention (NRR): 124%"
+
+
+def test_build_pipeline_result_marks_partial_for_mid_drift_unresolved_issue() -> None:
+    """Mid-drift runs with unresolved issues should land in the partial state."""
 
     request = PipelineRequest(
         user_goal="Analyze a financial report",
@@ -197,4 +291,106 @@ def test_build_pipeline_result_requires_review_with_unresolved_high_issue() -> N
     )
 
     assert result.pipeline_trustworthy is False
+    assert result.overall_verdict == "PARTIALLY_VERIFIED"
+
+
+def test_build_pipeline_result_requires_review_when_corrections_lag_hallucinations() -> None:
+    """Trust must fail when not every flagged hallucination is corrected."""
+
+    request = PipelineRequest(
+        user_goal="Analyze a startup memo",
+        steps=[
+            PipelineStep(
+                step_id="step_1",
+                name="Memo Writer",
+                instruction="Write the memo using only grounded figures from the source materials.",
+                input_context="[SOURCE DOCUMENTS INJECTED]",
+            )
+        ],
+        source_documents=["Growth was 180%, burn was $185,000, concentration was 18%."],
+        auto_fix=True,
+        driftwatch_enabled=True,
+    )
+    result = _build_pipeline_result(
+        request,
+        [
+            AuditResult(
+                step_id="step_1",
+                step_name="Memo Writer",
+                verdict="FLAG",
+                drift_score=1.0,
+                issues=[
+                    AuditIssue(
+                        type="HALLUCINATION",
+                        severity="HIGH",
+                        claim="110%",
+                        reason="Unsupported growth figure.",
+                        suggestion="Replace with 180%.",
+                    ),
+                    AuditIssue(
+                        type="HALLUCINATION",
+                        severity="HIGH",
+                        claim="$115,000",
+                        reason="Unsupported burn figure.",
+                        suggestion="Replace with $185,000.",
+                    ),
+                    AuditIssue(
+                        type="HALLUCINATION",
+                        severity="HIGH",
+                        claim="11%",
+                        reason="Unsupported concentration figure.",
+                        suggestion="Replace with 18%.",
+                    ),
+                ],
+                summary="Hallucinations detected.",
+                original_output="Growth 110%, burn $115,000, concentration 11%.",
+                final_output="Growth 180%, burn $115,000, concentration 11%.",
+                auto_fixed=False,
+                detected_hallucinations=3,
+                corrected_hallucinations=1,
+            )
+        ],
+    )
+
+    assert result.total_hallucinations == 3
+    assert result.total_corrections == 1
+    assert result.pipeline_trustworthy is False
     assert result.overall_verdict == "REVIEW_REQUIRED"
+
+
+def test_build_pipeline_result_marks_partial_when_not_in_sources_remains() -> None:
+    """Presence of a NOT IN SOURCES marker should prevent full trust."""
+
+    request = PipelineRequest(
+        user_goal="Write a startup memo",
+        steps=[
+            PipelineStep(
+                step_id="step_1",
+                name="Memo Writer",
+                instruction="Write a grounded memo using only the provided source materials.",
+                input_context="[SOURCE DOCUMENTS INJECTED]",
+            )
+        ],
+        source_documents=["ARR is $1.8M."],
+        auto_fix=True,
+        driftwatch_enabled=True,
+    )
+    result = _build_pipeline_result(
+        request,
+        [
+            AuditResult(
+                step_id="step_1",
+                step_name="Memo Writer",
+                verdict="PASS",
+                drift_score=0.2,
+                issues=[],
+                summary="Grounded output.",
+                original_output="ARR is $1.8M.",
+                final_output="[NOT IN SOURCES: this information was not provided in the source documents]",
+                auto_fixed=False,
+            )
+        ],
+    )
+
+    assert result.pipeline_trustworthy is False
+    assert result.overall_verdict == "PARTIALLY_VERIFIED"

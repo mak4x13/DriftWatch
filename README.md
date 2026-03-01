@@ -27,26 +27,26 @@ That turns the system from a black-box chain into an inspectable process. Instea
   |                  DriftWatch System                      |
   |                                                         |
   |  [Browser UI]  <------------------------------------+   |
-  |       |                                            |   |
-  |       | HTTP POST /api/pipeline/run                |   |
-  |       v                                        SSE |   |
-  |  [FastAPI Backend]                           stream|   |
-  |       |                                            |   |
-  |       +--- Step 1: AgentRunner ---> Mistral API    |   |
-  |       |         (runs pipeline step)               |   |
-  |       |              |                             |   |
-  |       |              v                             |   |
-  |       +--- Step 2: Auditor ------> Mistral API     |   |
-  |       |         (checks output vs sources)         |   |
-  |       |              |                             |   |
-  |       |         [PASS / FLAG]                      |   |
-  |       |              |                             |   |
-  |       |         FLAG? -> AutoFix -> Mistral API    |   |
-  |       |              |                             |   |
-  |       v              v                             |   |
-  |  [ChromaDB]    [AuditLog] ------------------------>+   |
-  |  (vector store  (JSON trail for UI)                   |
-  |   for RAG)                                           |
+  |       |                                            |    |
+  |       | HTTP POST /api/pipeline/run                |    |
+  |       v                                        SSE |    |
+  |  [FastAPI Backend]                           stream|    |
+  |       |                                            |    |
+  |       +--- Step 1: AgentRunner ---> Mistral API    |    |
+  |       |         (runs pipeline step)               |    |
+  |       |              |                             |    |
+  |       |              v                             |    | 
+  |       +--- Step 2: Auditor ------> Mistral API     |    |
+  |       |         (checks output vs sources)         |    |
+  |       |              |                             |    |
+  |       |         [PASS / FLAG]                      |    |
+  |       |              |                             |    |
+  |       |         FLAG? -> AutoFix -> Mistral API    |    |
+  |       |              |                             |    |
+  |       v              v                             |    |
+  |  [ChromaDB]    [AuditLog] ------------------------>+    |
+  |  (vector store  (JSON trail for UI)                     |
+  |   for RAG)                                              |
   +---------------------------------------------------------+
 ```
 

@@ -29,6 +29,28 @@ class PipelineRequest(BaseModel):
     driftwatch_enabled: bool = True
 
 
+class StepGenerationRequest(BaseModel):
+    """A request to derive a pipeline plan from goal and source material."""
+
+    run_id: str = Field(default_factory=lambda: str(uuid4()))
+    user_goal: str
+    source_documents: list[str]
+
+
+class GeneratedPipelineStep(BaseModel):
+    """A lightweight AI-generated pipeline step definition."""
+
+    step_name: str
+    instruction: str
+
+
+class StepGenerationResponse(BaseModel):
+    """A response containing generated step definitions for the UI."""
+
+    run_id: str
+    steps: list[GeneratedPipelineStep]
+
+
 class SourceDocument(BaseModel):
     """A source document payload for explicit ingestion."""
 
@@ -58,6 +80,8 @@ class AuditResult(BaseModel):
     original_output: str
     final_output: str
     auto_fixed: bool = False
+    detected_hallucinations: int = 0
+    corrected_hallucinations: int = 0
 
 
 class AuditEvent(BaseModel):
@@ -65,6 +89,7 @@ class AuditEvent(BaseModel):
 
     event_type: Literal[
         "STEP_START",
+        "STEP_TOKEN",
         "STEP_COMPLETE",
         "AUDIT_RESULT",
         "AUTOFIX",
@@ -89,5 +114,5 @@ class PipelineResult(BaseModel):
     total_hallucinations: int
     total_corrections: int
     pipeline_trustworthy: bool
-    overall_verdict: Literal["TRUSTWORTHY", "REVIEW_REQUIRED"]
+    overall_verdict: Literal["TRUSTWORTHY", "PARTIALLY_VERIFIED", "REVIEW_REQUIRED"]
     driftwatch_enabled: bool

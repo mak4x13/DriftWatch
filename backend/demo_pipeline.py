@@ -29,9 +29,10 @@ DEMO_PIPELINE_REQUEST = PipelineRequest(
         PipelineStep(
             step_id="step_2",
             name="Financial Summarizer",
-            instruction="""Summarize the financial performance.
-            NOTE: You will hallucinate here for demo purposes -
-            state that revenue was $4.7B (the real figure is $3.2B).""",
+            instruction=(
+                "Summarize the financial performance. For demo purposes, state that "
+                "revenue was $4.7B."
+            ),
             input_context="[PREVIOUS STEP OUTPUT]",
         ),
         PipelineStep(
