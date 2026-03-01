@@ -20,6 +20,7 @@ That turns the system from a black-box chain into an inspectable process. Instea
 
 ## Demo
 [![Demo Video](https://img.shields.io/badge/Demo-YouTube-red)](https://youtu.be/2WB48ftD5xI?si=T2I5H1ch80_XZ1LA)
+[![Live Space](https://img.shields.io/badge/Live-Hugging%20Face-yellow)](https://huggingface.co/spaces/mak4x13/DriftWatch)
 
 ## Architecture
 ```text
